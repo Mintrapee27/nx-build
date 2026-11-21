@@ -4593,30 +4593,30 @@ static int mem_any(const uint8_t *p, uint64_t n) {   // whether any byte is non-
 // lobby the plaza's reflections spread them as black and red blocks. Those texels alone start from 0 (storage_clean), and the rest of the storage is the content.
 // One element per texel for RG11B10 (its three channels share 32 bits), one per channel for the 16- and 32-bit formats. Only a CPU_NO_ACCESS pool's storage is read this way:
 // in a pool the CPU can write, what the storage holds at first use is what the game put there (t_direct_upload fills RGBA16F with NaN and infinity on purpose).
-static int storage_float_layout(MTLPixelFormat pf) {   // the element size in bytes, 0 for a format this does not read
+static int storage_float_size(MTLPixelFormat pf) {   // the element size in bytes, 0 for a format this does not read
     switch (pf) {
-        case MTLPixelFormatRG11B10Float: return 4 | 0x100;
+        case MTLPixelFormatRG11B10Float: return 4;
         case MTLPixelFormatRGBA16Float: case MTLPixelFormatRG16Float: case MTLPixelFormatR16Float: return 2;
         case MTLPixelFormatRGBA32Float: case MTLPixelFormatRG32Float: case MTLPixelFormatR32Float: return 4;
         default: return 0;
     }
 }
-static int float_bad(int layout, const uint8_t *p) {
-    if (layout & 0x100) { uint32_t v; memcpy(&v, p, 4); return ((v >> 6) & 31) == 31 || ((v >> 17) & 31) == 31 || ((v >> 27) & 31) == 31; }
-    if (layout == 2) { uint16_t v; memcpy(&v, p, 2); return (v & 0x7c00) == 0x7c00; }
+static int float_bad(MTLPixelFormat pf, int size, const uint8_t *p) {
+    if (pf == MTLPixelFormatRG11B10Float) { uint32_t v; memcpy(&v, p, 4); return ((v >> 6) & 31) == 31 || ((v >> 17) & 31) == 31 || ((v >> 27) & 31) == 31; }
+    if (size == 2) { uint16_t v; memcpy(&v, p, 2); return (v & 0x7c00) == 0x7c00; }
     uint32_t v; memcpy(&v, p, 4); return (v & 0x7f800000) == 0x7f800000;
 }
 static size_t storage_nonfinite(const tex_t *t, MTLPixelFormat pf, size_t *all) {   // the non-finite elements, and in *all how many were read
-    int layout = storage_float_layout(pf), size = layout & 0xff; size_t bad = 0, n = 0;
+    int size = storage_float_size(pf); size_t bad = 0, n = 0;
     const uint8_t *p = t->mem;
-    for (size_t i = 0; size && i + size <= t->L.size; i += size, n++) bad += float_bad(layout, p + i);
+    for (size_t i = 0; size && i + size <= t->L.size; i += size, n++) bad += float_bad(pf, size, p + i);
     *all = n; return bad;
 }
 static uint8_t *storage_clean(const tex_t *t, MTLPixelFormat pf) {   // a copy of the storage with each non-finite element 0; NULL without memory
-    int layout = storage_float_layout(pf), size = layout & 0xff; uint8_t *c = malloc(t->L.size ? t->L.size : 1);
+    int size = storage_float_size(pf); uint8_t *c = malloc(t->L.size ? t->L.size : 1);
     if (!c) return NULL;
     memcpy(c, t->mem, t->L.size);
-    for (size_t i = 0; size && i + size <= t->L.size; i += size) if (float_bad(layout, c + i)) memset(c + i, 0, (size_t)size);
+    for (size_t i = 0; size && i + size <= t->L.size; i += size) if (float_bad(pf, size, c + i)) memset(c + i, 0, (size_t)size);
     return c;
 }
 static int tex_init_fill(const tex_t *t, id<MTLTexture> mt) {
