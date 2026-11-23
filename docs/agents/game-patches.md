@@ -46,6 +46,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | `build` → `game` | task ring push and pop barriers | race | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | a data race in the game's own task ring |
 | `build` → `game` | UE3's GMalloc setup skipped, the host allocator in (hle_uemalloc.c) | address space | gap | judgement | 1 | [Batman: Arkham Knight](../../dm/games/0100ACD0163D0000/README.md) | UE3 inlines the allocator's constructor into the GMalloc setup and has its own vtable layout (25 slots, 32-bit sizes), so the Unreal 4/5 discovery does not apply |
 | `build` → `game` | unused 272-byte slot pool: 4,194,304 → 65,536 slots | address space | gap | judgement | 1 | [Mario + Rabbids® Sparks of Hope](../../dm/games/0100317013770000/README.md) | Sparks of Hope's own init (Kingdom Battle has none) |
+| `build` → `game` | screen shape: Unity's screen and swapchain size, Screen.SetResolution's clamp and the orthographic cameras' width (DM_SCREEN_ASPECT) | rendering | blocked: the stubs have no function-matched form yet | judgement | 2 | [Taiko no Tatsujin: Rhythm Festival (01006B0016AD6000)](../../dm/games/01006B0016AD6000/README.md); [Taiko no Tatsujin: Rhythm Festival (0100BCA0135A0000)](../../dm/games/0100BCA0135A0000/README.md) | the output size is the host's, but where Unity takes its sizes is this build's code |
 | `build` → `engine` | Criterion's 60 fps mode, frame ticks and game step at fixed addresses | frame rate | blocked: one game on that engine here | judgement | 1 | [Need For Speed™ Hot Pursuit Remastered](../../dm/games/010029B0118E8000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | Next Level Games' frame limiter target at a fixed address | frame rate | blocked: one game on that engine here | judgement | 1 | [Luigi's Mansion 3](../../dm/games/0100DCA0064A6000/README.md) | the studio's engine, which its other games ship |
 | `build` → `engine` | RE Engine's frame limit at a fixed pointer | frame rate | blocked: one RE Engine game here | judgement | 1 | [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) | engine code other RE Engine games ship |
@@ -94,6 +95,8 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [South Park: The Stick of Truth](#south-park-the-stick-of-truth) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Smash Bros. Ultimate](#super-smash-bros-ultimate) | 11 | 0 | 0 | 1 | 0 | `game` |
+| [Taiko no Tatsujin: Rhythm Festival (01006B0016AD6000)](#taiko-no-tatsujin-rhythm-festival-01006b0016ad6000) | 0 | 0 | 25 | 0 | 0 | `build` → `game` |
+| [Taiko no Tatsujin: Rhythm Festival (0100BCA0135A0000)](#taiko-no-tatsujin-rhythm-festival-0100bca0135a0000) | 0 | 0 | 25 | 0 | 0 | `build` → `game` |
 | [Taiko Risshiden V DX](#taiko-risshiden-v-dx) | 1 | 0 | 0 | 2 | 0 | `game` |
 | [Teenage Mutant Ninja Turtles: Shredder's Revenge](#teenage-mutant-ninja-turtles-shredders-revenge) | 0 | 0 | 0 | 1 | 0 | `game` |
 | [The Legend of Heroes: Trails into Reverie](#the-legend-of-heroes-trails-into-reverie) | 0 | 0 | 0 | 1 | 0 | `game` |
@@ -564,6 +567,82 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - cut `+0x37ca3cc`: node pool bound: region end mov x8,#0xf80000000 → mov x8,#0x100000000
   - cut `+0x37caf68`: node pool bound: region end mov x9,#0xf80000000 → mov x9,#0x100000000
 - **function-matched** (`main` of builds without CUTS): engine region 62 GB → 4 GB (11 instructions in four functions): 4 functions, 11 cuts
+
+### Taiko no Tatsujin: Rhythm Festival (01006B0016AD6000)
+
+[Taiko no Tatsujin: Rhythm Festival (01006B0016AD6000)](../../dm/games/01006B0016AD6000/README.md), `01006B0016AD6000`, [patches.py](../../dm/games/01006B0016AD6000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: Unity's screen and swapchain size, Screen.SetResolution's clamp and the orthographic cameras' width (DM_SCREEN_ASPECT). The output size is the host's, but where Unity takes its sizes is this build's code
+
+- **6.2.0 `main`** `7150d78c…`
+  <details><summary>25 frame-step sites</summary>
+
+  - frame step `+0x34d5d0`: Screen.SetResolution: the height follows the width in the screen's shape
+  - frame step `+0x34d614`: Screen.SetResolution: 1280 x the screen's height is a standard size
+  - frame step `+0x34d62c`: Screen.SetResolution: 1920 x the screen's height is a standard size
+  - frame step `+0x7c0648`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x19)
+  - frame step `+0x7c0664`: SetOrtho caller: bottom and top moved by the helper bar camera's shift (x19)
+  - frame step `+0x7cb17c`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x20)
+  - frame step `+0x7cb20c`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x0)
+  - frame step `+0x7cb220`: SetOrtho caller: bottom and top moved by the helper bar camera's shift (x0)
+  - frame step `+0x7d0040`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x21)
+  - frame step `+0x7d0058`: SetOrtho caller: bottom and top moved by the helper bar camera's shift (x21)
+  - frame step `+0x85b504`: sprite render node: a 16:9 screen sized sprite scaled to cover the taller screen (bit 6)
+  - frame step `+0x85b9e8`: sprite render node: a 16:9 screen sized sprite scaled to cover the taller screen (bit 6)
+  - frame step `+0x8ff850`: graphics device init: the back buffer's height
+  - frame step `+0x900950`: Unity GetScreenSize: the handheld height (its default)
+  - frame step `+0x9009f4`: Unity GetScreenSize: the docked height
+  - frame step `+0x900a0c`: Unity GetScreenSize: the docked height (boost mode)
+  - frame step `+0x9169b0`: swapchain colour textures: their height
+  - frame step `+0x916c30`: swapchain depth texture: its height
+  - frame step `+0x1b2c140`: LetterBoxCamera.Start: the story scenes' dimming sprite scaled to cover the taller screen (bit 5)
+  - frame step `+0x1b2c2bc`: LetterBoxCamera.RefreshCamera: no letterbox on the taller screen (the story scenes fill it)
+  - frame step `+0x1ce7e40`: EnsoPartsBase.OnInitialize: gameplay's top band stretched to the taller screen's edge (bit 4)
+  - frame step `+0x1e756d4`: TransitionSceneControllerBase.OnInitialize: the loading screens' edge-anchored UI (bit 4)
+  - frame step `+0x1ee9e2c`: SceneControllerBase.OnInitialize: the edge-anchored UI moved to the taller screen's edges (bit 4)
+  - frame step `+0x1fcd0dc`: PresenterWindowControllerBase.Initialized: the popups' full-width footer moved to the taller screen's bottom (bit 5)
+  - frame step `+0x35379d4`: FooterController.OnInitialize: the song select footer fitted to the unwidened helper bar camera (bit 5)
+
+  </details>
+
+
+### Taiko no Tatsujin: Rhythm Festival (0100BCA0135A0000)
+
+[Taiko no Tatsujin: Rhythm Festival (0100BCA0135A0000)](../../dm/games/0100BCA0135A0000/README.md), `0100BCA0135A0000`, [patches.py](../../dm/games/0100BCA0135A0000/patches.py).
+
+- **`build` → `game`**, rendering, blocked: the stubs have no function-matched form yet, judgement: screen shape: Unity's screen and swapchain size, Screen.SetResolution's clamp and the orthographic cameras' width (DM_SCREEN_ASPECT). The output size is the host's, but where Unity takes its sizes is this build's code
+
+- **7.0.0 `main`** `d907a35c…` ([patches.py:12](../../dm/games/0100BCA0135A0000/patches.py#L12))
+  <details><summary>25 frame-step sites</summary>
+
+  - frame step `+0x3551c0`: Screen.SetResolution: the height follows the width in the screen's shape
+  - frame step `+0x355204`: Screen.SetResolution: 1280 x the screen's height is a standard size
+  - frame step `+0x35521c`: Screen.SetResolution: 1920 x the screen's height is a standard size
+  - frame step `+0x7c8238`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x19)
+  - frame step `+0x7c8254`: SetOrtho caller: bottom and top moved by the helper bar camera's shift (x19)
+  - frame step `+0x7d2d6c`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x20)
+  - frame step `+0x7d2dfc`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x0)
+  - frame step `+0x7d2e10`: SetOrtho caller: bottom and top moved by the helper bar camera's shift (x0)
+  - frame step `+0x7d7c30`: SetOrtho caller: the orthographic size widened to keep 16:9's sides (x21)
+  - frame step `+0x7d7c48`: SetOrtho caller: bottom and top moved by the helper bar camera's shift (x21)
+  - frame step `+0x8630f4`: sprite render node: a 16:9 screen sized sprite scaled to cover the taller screen (bit 6)
+  - frame step `+0x8635d8`: sprite render node: a 16:9 screen sized sprite scaled to cover the taller screen (bit 6)
+  - frame step `+0x907440`: graphics device init: the back buffer's height
+  - frame step `+0x908540`: Unity GetScreenSize: the handheld height (its default)
+  - frame step `+0x9085e4`: Unity GetScreenSize: the docked height
+  - frame step `+0x9085fc`: Unity GetScreenSize: the docked height (boost mode)
+  - frame step `+0x91e5a0`: swapchain colour textures: their height
+  - frame step `+0x91e820`: swapchain depth texture: its height
+  - frame step `+0x1b55ee0`: LetterBoxCamera.Start: the story scenes' dimming sprite scaled to cover the taller screen (bit 5)
+  - frame step `+0x1b5605c`: LetterBoxCamera.RefreshCamera: no letterbox on the taller screen (the story scenes fill it)
+  - frame step `+0x1d3bfc0`: EnsoPartsBase.OnInitialize: gameplay's top band stretched to the taller screen's edge (bit 4)
+  - frame step `+0x1e42b1c`: SceneControllerBase.OnInitialize: the edge-anchored UI moved to the taller screen's edges (bit 4)
+  - frame step `+0x1f11e24`: TransitionSceneControllerBase.OnInitialize: the loading screens' edge-anchored UI (bit 4)
+  - frame step `+0x1f2fb54`: FooterController.OnInitialize: the song select footer fitted to the unwidened helper bar camera (bit 5)
+  - frame step `+0x21231ec`: PresenterWindowControllerBase.Initialized: the popups' full-width footer moved to the taller screen's bottom (bit 5)
+
+  </details>
+
 
 ### Taiko Risshiden V DX
 
