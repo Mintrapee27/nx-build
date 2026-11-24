@@ -85,6 +85,7 @@ jobs:
             -o "$RUNNER_TEMP/out/game.ipa" \
             --work-dir "$RUNNER_TEMP/work" \
             --no-keep-extracted \
+            --allow-other-metal \
             --progress lines
 
       - name: Upload IPA
