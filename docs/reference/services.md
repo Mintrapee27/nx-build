@@ -952,8 +952,8 @@ Most service calls can be found before they crash, before the first boot or the 
 ### Mouse, keyboard and key code maps
 
 - **Symptom:** the first boot aborted in `hid::GetMouseState` (the SDK's mouse resource was never initialized).
-- **Fix:** hooked: `hid::GetMouseState`, `hid::GetKeyboardStates`, and `kpr::GetKeyCodeMap`, which asks the settings service (`settings::detail::GetKeyCodeMap`) for the keyboard layout's map; the host leaves the map zero.
-- **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `GetMouseState`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, `GetKeyboardStates`); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (`kpr::GetKeyCodeMap`: the game zeroes a 0x1000-byte map and fetches it only once a keyboard reports keys, `main+0x1f0eb4`).
+- **Fix:** hooked: `hid::GetMouseState`, `hid::GetKeyboardStates`, and `kpr::GetKeyCodeMap`, which asks the settings service (`settings::detail::GetKeyCodeMap`) for the keyboard layout's map; the host leaves the map zero. The Switch 2 SDK's handle forms of the mouse are hooked too: `GetMouseHandle` (handle 0), `InitializeMouse(handle)` and `GetMouseStates(states, count, handle)`, every entry zeroed (not connected) with consecutive sampling numbers. Without them the SDK's `InitializeMouse` connects to the hid service itself and the game aborts with 0xe15 (`[RED] sf: the game connects to service hid itself`).
+- **Found on:** [13 Sentinels: Aegis Rim](../../dm/games/01003FC01670C000/README.md) (SDK 11, `GetMouseState`); [Monster Hunter Rise](../../dm/games/0100B04011742000/README.md) (SDK 11, `GetKeyboardStates`); [DRAGON QUEST VII Reimagined](../../dm/games/0100A9D01C446000/README.md) (`kpr::GetKeyCodeMap`: the game zeroes a 0x1000-byte map and fetches it only once a keyboard reports keys, `main+0x1f0eb4`); Cyberpunk 2077 (`0400DDB020648000`, no profile yet: the handle forms, `InitializeMouse` at boot from `main+0x968060`).
 
 ### Poké Ball Plus (Palma)
 
@@ -1912,6 +1912,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Cause:** the game chooses its output from `nn::vi::QueryDisplayBufferMaxResolution` (its tables: 0 is 720p, 1 is 1080p, 2 is 1440p, 3 is 4K), and what the game got before the hook gave it 720p.
 - **Fix:** `hle_vi.c` answers as a Switch 2 does: in handheld mode its own 1080p screen; in console mode the largest of the four that the display the game is shown on holds, as a docked Switch 2 does with its TV. The display's size comes from the front end (`front_display_pixels`: on the Mac the window's screen in its current mode, an iPhone's or iPad's screen), 1080p when it is not known. The host logs the answer once.
 - **Found on:** [Fire Emblem Fortune's Weave](../../dm/games/04007EF01F8AE000/README.md): its DLSS output is 2048x1152 for 1440p and for 4K, from 1024x576; for 1080p it renders 960x540 into 1920x1080, a fifth fewer pixels at each stage, and the output matches the screen.
+
+### The display's refresh rate
+
+- **Symptom:** a Switch 2 game stays on its boot screen with its sound playing, and the log shows `[nvn] WindowInitialize` several times a second.
+- **Cause:** the SDK's `nn::vi::QueryDisplayCurrentRefreshRate` answers only for its internal default display (`sdk+0x55dbd0`). For the display the host opens it returns 0x272 and leaves the output as the game set it. Cyberpunk 2077 reads the rate in Hz, and 0 as its variable-rate mode (`main+0x81e88c`). In that mode its swap chain wants 4 active textures (`main+0x854fe8`, `nvnWindowGetNumActiveTextures`), but it builds the chain with 2 from another flag (`main+0x8155d0`). So every frame it finalized and initialized its window again.
+- **Fix:** `hle_vi.c` answers 60, the fixed rate the host presents at.
+- **Found on:** Cyberpunk 2077 (`0400DDB020648000`, no profile yet): `WindowInitialize` went from about 5,600 calls in 180 s to 3, and the game left its boot screen for its loading screen.
 
 ### A game that decodes its code at run time
 

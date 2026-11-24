@@ -887,6 +887,14 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
 - **Found on:** [The Witcher 3: Wild Hunt — Complete Edition](../../dm/games/0100A0800E9C4000/README.md) (v458752): 29,673 shaders (vertex 24,617, pixel 4,968, compute 46, geometry 22, domain 13, hull 7; 21,233 from `content`, 7,877 from the DLCs) in 80 s on an M1 Max, against 563 before.
 - **Check:** `dm/tools/tests/test_split_redengine.py` covers material records, static shader programs spanning chunks, an uncompressed DLC stub, wrong lengths, a damaged record flag, and zstd errors in both formats. A flag at +8 without the footer still goes through the plain reader.
 
+### REDengine 4 shader caches
+
+- **Symptom:** `the shader split found no shaders in main or the RomFS` on a game whose RomFS is mostly REDengine `.archive` files (`RDAR`).
+- **How it is stored:** the shaders are not in the archives. Two caches lie loose under `engine/`: `shaderemporium_final.cache` (the material shaders) and `staticshaderemporium_final.cache` (the engine's own, every compute shader among them). Neither is compressed. The material cache ends in `RDHS`, u32 10; the static one in `RDHS`, u32 8 and a u64 hash. Each shader is one NVN2 stage stored as {u64 hash, u32 code length, u32 control length, 0x20 bytes of the build machine's pointers, the code area, the control section}, sometimes followed by a few bytes. The material cache runs these records back to back up to its index, each behind {u64 hash, u64 hash, u32 record length}; the static cache keeps them among its technique entries.
+- **Fix:** `rdhs4_shaders` (`shader_split.py`) recognises a `.cache` file by either footer (`rdhs4_version`), takes every NVN2 control section with the code area right before it, and requires the record header before that code area to name both lengths (control +0x30 and +0x44). A control section that fails this makes the file unreadable. The shaders are single-stage programs (`#RDHS4@` in `SINGLE_STAGE`). The Witcher 3's version 3 footer stays with `rdhs_shaders`.
+- **Found on:** Cyberpunk 2077 (`0400DDB020648000`, update v262144, no profile yet): 18,567 records in the material cache and 530 in the static one, 6,754 distinct shaders (3,608 vertex, 2,803 pixel, 343 compute), against 0 before.
+- **Check:** `dm/tools/tests/test_split_redengine.py` covers both footers, trailing bytes after a control section, a repeated shader, a record header that disagrees with its control section, and a version 3 footer that is not taken.
+
 ## Control sections and code
 
 ### Code area and control section layout
@@ -2194,8 +2202,9 @@ Finding, keying and translating shaders (`dm/gfx/tools/shader_split.py`, `dmsh_b
   - **ABI:** `DMSH_PUSH_BLOCKS` is 6.
   - **Host:** `push_const` keeps graphics blocks 0 to 5, and compute's 0 and 1.
   - **Removed:** the per-stage fill of `c[0] + 0x210` for graphics stages; only compute reads that table.
-  - **Check:** `Nvn2Buffers.test_a_graphics_stage_bank_is_its_push_block` fails on the old translator.
-- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `c[25]` in 9,944 vertex shaders, `c[26]` in 538 mesh and 3 hull shaders, `c[27]` in 37 domain shaders, `c[28]` in 1 geometry shader, `c[29]` in 12,195 pixel shaders. In one intro frame it pushes block 1 157 times, block 2 51 times and block 5 92 times. A host-only test (each stage's rows filled from its block) brought back the ship's engines and the tower's lights at the moon base.
+  - **Check:** `Nvn2Buffers.test_a_push_block_bank_is_that_block_of_c24`.
+- **Later correction:** the bank is not the stage's. Every stage of the group reads push block b as `c[24 + b]`, and the game chooses the blocks. PRAGMATA's blocks happen to be 1 + its stage index. Cyberpunk 2077 pushes one 8-byte address into block 7 of both groups at boot, and its vertex and pixel shaders read it as `c[31][0]`; its pixel shaders also read `c[25]`. The translator refused those reads as another stage's bank, and 3,515 of its 6,754 shaders failed. `APushBlock` now maps any bank past 24 to `c[24] + (bank - 24) * 0x100`; the 5-bit bank field reaches block 7, the last of the eight the host keeps. The build no longer passes a per-stage bank (`stage_bank`). With it, 6,715 of Cyberpunk 2077's shaders translate.
+- **Found on:** [PRAGMATA](../../dm/games/0400C76024710000/README.md): `c[25]` in 9,944 vertex shaders, `c[26]` in 538 mesh and 3 hull shaders, `c[27]` in 37 domain shaders, `c[28]` in 1 geometry shader, `c[29]` in 12,195 pixel shaders. In one intro frame it pushes block 1 157 times, block 2 51 times and block 5 92 times. A host-only test (each stage's rows filled from its block) brought back the ship's engines and the tower's lights at the moon base. Cyberpunk 2077 (`0400DDB020648000`, no profile yet): the correction above.
 
 ### Uniform words read through a buffer address (cx)
 
