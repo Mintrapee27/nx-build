@@ -1,0 +1,69 @@
+name: Build Game IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      nsp_url:
+        description: 'Direct download link for game (.nsp)'
+        required: true
+        type: string
+      keys_url:
+        description: 'Direct download link for prod.keys'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+
+jobs:
+  build-ipa:
+    name: Build Unsigned IPA
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Xcode Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Install Python packages and build tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          python -m pip install lz4 "capstone>=5,<6" fonttools zbic
+          brew install xcodegen zstd glslang
+
+      - name: Download game file and prod.keys
+        env:
+          NSP_URL: ${{ inputs.nsp_url }}
+          KEYS_URL: ${{ inputs.keys_url }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/game" "$RUNNER_TEMP/keys" "$RUNNER_TEMP/out"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/game/game.nsp" "$NSP_URL"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/keys/prod.keys" "$KEYS_URL"
+          ls -lh "$RUNNER_TEMP/game/game.nsp" "$RUNNER_TEMP/keys/prod.keys"
+
+      - name: Build IPA from NSP
+        run: |
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" \
+            -k "$RUNNER_TEMP/keys/prod.keys" \
+            -o "$RUNNER_TEMP/out/game.ipa" \
+            --work-dir "$RUNNER_TEMP/work" \
+            --no-keep-extracted \
+            --progress lines
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: game-ipa
+          path: ${{ runner.temp }}/out/*.ipa
+          retention-days: 7
