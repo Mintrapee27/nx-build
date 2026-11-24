@@ -4,12 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Direct download link for game (.nsp)'
+        description: 'Direct download link for base game (.nsp)'
         required: true
         type: string
       keys_url:
         description: 'Direct download link for prod.keys'
         required: true
+        type: string
+      extra_urls:
+        description: 'Optional: Direct links for Update / DLC (.nsp), separated by spaces'
+        required: false
+        default: ''
         type: string
 
 permissions:
@@ -42,15 +47,21 @@ jobs:
           python -m pip install lz4 "capstone>=5,<6" fonttools zbic
           brew install xcodegen zstd glslang
 
-      - name: Download game file and prod.keys
+      - name: Download game files and prod.keys
         env:
           NSP_URL: ${{ inputs.nsp_url }}
           KEYS_URL: ${{ inputs.keys_url }}
+          EXTRA_URLS: ${{ inputs.extra_urls }}
         run: |
           mkdir -p "$RUNNER_TEMP/game" "$RUNNER_TEMP/keys" "$RUNNER_TEMP/out"
-          curl -fL --retry 3 -o "$RUNNER_TEMP/game/game.nsp" "$NSP_URL"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/game/base.nsp" "$NSP_URL"
           curl -fL --retry 3 -o "$RUNNER_TEMP/keys/prod.keys" "$KEYS_URL"
-          ls -lh "$RUNNER_TEMP/game/game.nsp" "$RUNNER_TEMP/keys/prod.keys"
+          i=1
+          for url in $EXTRA_URLS; do
+            curl -fL --retry 3 -o "$RUNNER_TEMP/game/extra_${i}.nsp" "$url"
+            i=$((i + 1))
+          done
+          ls -lh "$RUNNER_TEMP/game" "$RUNNER_TEMP/keys/prod.keys"
 
       - name: Build IPA from NSP
         run: |
