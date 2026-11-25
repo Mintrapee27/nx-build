@@ -60,7 +60,7 @@ jobs:
             local url="$1"
             local out="$2"
             if echo "$url" | grep -qiE "drive\.google\.com|docs\.google\.com"; then
-              gdown --fuzzy "$url" -O "$out"
+              gdown "$url" -O "$out"
             else
               curl -fL --retry 3 -o "$out" "$url"
             fi
