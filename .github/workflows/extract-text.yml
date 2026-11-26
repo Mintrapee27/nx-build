@@ -35,7 +35,7 @@ jobs:
           mkdir -p work/raw work/game work/keys work/romfs
 
           # โหลดและจัดการ keys
-          gdown --fuzzy "$KEYS_URL" -O work/raw/keys_in
+          gdown "$KEYS_URL" -O work/raw/keys_in
           if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
             FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
             [ -n "$FOUND_KEYS" ] && [ "$FOUND_KEYS" != "work/keys/prod.keys" ] && cp "$FOUND_KEYS" work/keys/prod.keys
@@ -44,14 +44,14 @@ jobs:
           fi
 
           # โหลดและจัดการไฟล์เกมหลัก
-          gdown --fuzzy "$NSP_URL" -O work/raw/base_in
+          gdown "$NSP_URL" -O work/raw/base_in
           if ! 7z x work/raw/base_in -owork/game -y >/dev/null 2>&1; then
             mv work/raw/base_in work/game/base.nsp
           fi
 
           # โหลดและจัดการไฟล์อัปเดต (ถ้ามี)
           if [ -n "$UPDATE_URL" ]; then
-            gdown --fuzzy "$UPDATE_URL" -O work/raw/upd_in
+            gdown "$UPDATE_URL" -O work/raw/upd_in
             if ! 7z x work/raw/upd_in -owork/game -y >/dev/null 2>&1; then
               mv work/raw/upd_in work/game/upd.nsp
             fi
