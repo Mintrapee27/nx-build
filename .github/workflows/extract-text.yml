@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile, Direct link, or Google Drive link for RomFS.img OR base game (.nsp/.xci/.nsz)'
+        description: 'Gofile or Direct link for base game (.nsp/.xci/.nsz) OR RomFS.img'
         required: true
         type: string
       update_url:
-        description: 'Link for Update file (leave blank if using RomFS.img)'
+        description: 'Optional: Gofile or Google Drive link for Update file'
         required: false
-        default: 'https://drive.google.com/file/d/1_cyvLZfiHaM1iVCS4aS4mwC5wc40eS5J/view?usp=drivesdk'
+        default: ''
         type: string
       keys_url:
-        description: 'Link for prod.keys (leave blank if using RomFS.img)'
+        description: 'Gofile or Google Drive link for prod.keys (not stored on GitHub)'
         required: false
-        default: 'https://drive.google.com/file/d/1QAzpusGYqRGnrXi9fJhS4SAd3nGu0edO/view?usp=drivesdk'
+        default: ''
         type: string
 
 jobs:
@@ -37,9 +37,9 @@ jobs:
           UPDATE_URL: ${{ inputs.update_url }}
           KEYS_URL: ${{ inputs.keys_url }}
         run: |
-          mkdir -p work/raw work/game work/keys work/romfs
+          mkdir -p work/raw work/game work/keys work/romfs work/inspect ~/.switch
 
-          cat << 'EOF' > dl_gofile.py
+          cat << 'EOF' > dl_browser.py
           import sys
           from playwright.sync_api import sync_playwright
 
@@ -51,9 +51,9 @@ jobs:
               context = browser.new_context(accept_downloads=True)
               page = context.new_page()
               page.goto(url, wait_until="networkidle", timeout=60000)
-              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=30000)
+              page.wait_for_selector("button:has-text('Download'), a:has-text('Download'), #uc-download-link", timeout=30000)
               with page.expect_download(timeout=0) as download_info:
-                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
+                  page.locator("button:has-text('Download'), a:has-text('Download'), #uc-download-link").first.click()
               download = download_info.value
               download.save_as(out)
               browser.close()
@@ -62,29 +62,43 @@ jobs:
           download_file() {
             local url="$1"
             local out="$2"
-            if [[ "$url" == *"drive.google.com"* ]]; then
-              gdown "$url" -O "$out"
-            elif [[ "$url" == *"gofile.io/d/"* ]]; then
-              echo "Downloading from Gofile via headless browser..."
-              python3 dl_gofile.py "$url" "$out"
+            if [[ "$url" == *"gofile.io/d/"* ]]; then
+              echo "Downloading from Gofile..."
+              python3 dl_browser.py "$url" "$out"
+            elif [[ "$url" == *"drive.google.com"* ]]; then
+              echo "Downloading from Google Drive..."
+              gdown "$url" -O "$out" || python3 dl_browser.py "$url" "$out"
             else
               curl -L -f "$url" -o "$out"
             fi
           }
 
           download_file "$NSP_URL" work/raw/main_in
+          ls -lh work/raw/main_in
 
-          # เช็กว่าเป็นไฟล์ RomFS.img โดยตรงหรือไม่
-          if hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in >/dev/null 2>&1; then
-            echo "Extracted directly from RomFS.img!"
+          # เช็กว่าเป็น RomFS.img โดยตรงหรือไม่
+          MAGIC=$(head -c 4 work/raw/main_in | tr -d '\0')
+          if [ "$MAGIC" = "IVFC" ]; then
+            echo "Detected RomFS.img! Extracting directly..."
+            hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in
           else
-            echo "Decrypting game package..."
+            echo "Detected Game Package! Preparing prod.keys..."
+            if [ -z "$KEYS_URL" ]; then
+              echo "Error: keys_url is required for .nsp/.xci files!"
+              exit 1
+            fi
+
             download_file "$KEYS_URL" work/raw/keys_in
             7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1 || cp work/raw/keys_in work/keys/raw.keys
 
-            # กรองเฉพาะบรรทัดที่รูปแบบถูกต้อง (key_name = hex_value) เพื่อกันไฟล์ขยะ/อักขระเพี้ยน
-            grep -E '^[a-zA-Z0-9_]+\s*=\s*[0-9a-fA-F]+' work/keys/* -h | tr -d '\r' > work/keys/prod_clean.keys
-            echo "Loaded $(wc -l < work/keys/prod_clean.keys) valid keys."
+            # คัดเฉพาะบรรทัดคีย์ที่สมบูรณ์และวางลง ~/.switch/prod.keys
+            find work/keys -type f -exec grep -hE '^[a-zA-Z0-9_]+\s*=\s*[0-9a-fA-F]{32,}' {} + | tr -d '\r' > ~/.switch/prod.keys
+            echo "Loaded $(wc -l < ~/.switch/prod.keys) valid keys into ~/.switch/prod.keys"
+
+            if [ ! -s ~/.switch/prod.keys ]; then
+              echo "Error: No valid keys found! Check your keys_url."
+              exit 1
+            fi
 
             if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
               mv work/raw/main_in work/game/base.nsp
@@ -105,20 +119,19 @@ jobs:
             UPD_FILE=$(ls -S work/game/* | sed -n '2p')
 
             mkdir -p work/nca
-            hactool -k work/keys/prod_clean.keys --intype=pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool -k work/keys/prod_clean.keys --intype=xci --securedir=work/nca "$BASE_FILE"
+            hactool --intype=pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool --intype=xci --securedir=work/nca "$BASE_FILE"
             MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
 
             if [ -n "$UPD_FILE" ]; then
               mkdir -p work/nca_upd
-              hactool -k work/keys/prod_clean.keys --intype=pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
+              hactool --intype=pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
               UPD_NCA=$(ls -S work/nca_upd/*.nca | head -n 1)
-              hactool -k work/keys/prod_clean.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
+              hactool --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
             else
-              hactool -k work/keys/prod_clean.keys --romfsdir=work/romfs "$MAIN_NCA"
+              hactool --romfsdir=work/romfs "$MAIN_NCA"
             fi
           fi
 
-          mkdir -p work/inspect
           find work/romfs -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" \) -exec cp --parents {} work/inspect/ \;
           ls -lh work/inspect/work/romfs/
 
