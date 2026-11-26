@@ -22,14 +22,16 @@ jobs:
   extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Install tools & Build hactool
+      - name: Install tools & Build nstool + hactool
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl cmake
           pip install gdown nsz playwright
           playwright install chromium
+          git clone --depth 1 https://github.com/jakcron/nstool.git
+          cd nstool && make -j$(nproc) && sudo cp bin/nstool /usr/local/bin/
+          cd ..
           git clone --depth 1 https://github.com/SciresM/hactool.git
-          cd hactool && cp config.mk.template config.mk && make -j$(nproc)
-          sudo cp hactool /usr/local/bin/
+          cd hactool && cp config.mk.template config.mk && make -j$(nproc) && sudo cp hactool /usr/local/bin/
 
       - name: Download & Extract RomFS
         env:
@@ -76,11 +78,10 @@ jobs:
           download_file "$NSP_URL" work/raw/main_in
           ls -lh work/raw/main_in
 
-          # ลองแตกแบบ RomFS.img ตรงๆ ก่อนเสมอ
-          echo "Trying direct RomFS extraction..."
-          hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in || true
+          # ใช้ nstool แตก RomFS.img ตรงๆ (รองรับทั้ง IVFC และ Raw RomFS โดยไม่แครช)
+          echo "Trying direct RomFS extraction with nstool..."
+          nstool -t romfs -x work/romfs work/raw/main_in || true
 
-          # ถ้าโฟลเดอร์ work/romfs ยังว่างเปล่า แสดงว่าเป็นไฟล์ .nsp/.xci/.nsz ให้เข้าโหมดถอดรหัส
           if [ -z "$(ls -A work/romfs)" ]; then
             echo "Not a raw RomFS.img. Switching to Game Package decryption..."
             if [ -z "$KEYS_URL" ]; then
@@ -130,7 +131,7 @@ jobs:
               hactool --romfsdir=work/romfs "$MAIN_NCA"
             fi
           else
-            echo "Successfully extracted RomFS.img directly!"
+            echo "Successfully extracted RomFS.img with nstool!"
           fi
 
           find work/romfs -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" \) -exec cp --parents {} work/inspect/ \;
