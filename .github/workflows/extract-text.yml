@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile, Direct link, or Google Drive link for base game (.nsp/.xci/.nsz) OR RomFS.img'
+        description: 'Gofile, Direct link, or Google Drive link for RomFS.img OR base game (.nsp/.xci/.nsz)'
         required: true
         type: string
       update_url:
@@ -63,7 +63,7 @@ jobs:
             local url="$1"
             local out="$2"
             if [[ "$url" == *"drive.google.com"* ]]; then
-              gdown "$url" -O "$out"
+              gdown --fuzzy "$url" -O "$out"
             elif [[ "$url" == *"gofile.io/d/"* ]]; then
               echo "Downloading from Gofile via headless browser..."
               python3 dl_gofile.py "$url" "$out"
@@ -74,21 +74,19 @@ jobs:
 
           download_file "$NSP_URL" work/raw/main_in
 
-          # เช็กว่าเป็นไฟล์ RomFS.img อยู่แล้วหรือไม่
-          if hactool -t romfs --romfsdir=work/romfs work/raw/main_in >/dev/null 2>&1; then
+          # เช็กว่าเป็นไฟล์ RomFS.img โดยใช้ --intype=romfs (ไม่ต้องใช้ prod.keys)
+          if hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in; then
             echo "Extracted directly from RomFS.img!"
           else
-            if [ -z "$KEYS_URL" ]; then
-              echo "Error: keys_url is required for .nsp/.xci files!"
-              exit 1
-            fi
+            echo "Not a raw RomFS.img, decrypting game package..."
             download_file "$KEYS_URL" work/raw/keys_in
             if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
-              FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
-              [ -n "$FOUND_KEYS" ] && [ "$FOUND_KEYS" != "work/keys/prod.keys" ] && cp "$FOUND_KEYS" work/keys/prod.keys
+              FOUND_KEYS=$(find work/keys -type f -iname "*prod*.keys" | head -n 1)
+              [ -n "$FOUND_KEYS" ] && cp "$FOUND_KEYS" work/keys/prod.keys
             else
               cp work/raw/keys_in work/keys/prod.keys
             fi
+            tr -d '\r' < work/keys/prod.keys > work/keys/prod_clean.keys
 
             if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
               mv work/raw/main_in work/game/base.nsp
@@ -109,16 +107,16 @@ jobs:
             UPD_FILE=$(ls -S work/game/* | sed -n '2p')
 
             mkdir -p work/nca
-            hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool -k work/keys/prod.keys -t xci --securedir=work/nca "$BASE_FILE"
+            hactool -k work/keys/prod_clean.keys --intype=pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool -k work/keys/prod_clean.keys --intype=xci --securedir=work/nca "$BASE_FILE"
             MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
 
             if [ -n "$UPD_FILE" ]; then
               mkdir -p work/nca_upd
-              hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
+              hactool -k work/keys/prod_clean.keys --intype=pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
               UPD_NCA=$(ls -S work/nca_upd/*.nca | head -n 1)
-              hactool -k work/keys/prod.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
+              hactool -k work/keys/prod_clean.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
             else
-              hactool -k work/keys/prod.keys --romfsdir=work/romfs "$MAIN_NCA"
+              hactool -k work/keys/prod_clean.keys --romfsdir=work/romfs "$MAIN_NCA"
             fi
           fi
 
