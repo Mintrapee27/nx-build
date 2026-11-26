@@ -146,12 +146,25 @@ jobs:
 
       - name: Build IPA from NSP
         run: |
+          TOTAL_BYTES=$(find "$RUNNER_TEMP/game" -maxdepth 1 -type f -exec stat -f%z {} + | awk '{s+=$1} END {print s+0}')
+          LIMIT_BYTES=$((4 * 1024 * 1024 * 1024))
+
+          if [ "$TOTAL_BYTES" -gt "$LIMIT_BYTES" ]; then
+            echo "ขนาดไฟล์เกมเกิน 4GB ($TOTAL_BYTES bytes) -> ใช้โหมดแยก RomFS.img อัตโนมัติ"
+            ROMFS_MODE="separate"
+            KEEP_FLAG="--keep-extracted"
+          else
+            echo "ขนาดไฟล์เกมไม่เกิน 4GB ($TOTAL_BYTES bytes) -> รวมใน IPA ไฟล์เดียว (bundle)"
+            ROMFS_MODE="bundle"
+            KEEP_FLAG="--no-keep-extracted"
+          fi
+
           python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" \
             -k "$RUNNER_TEMP/keys/prod.keys" \
             -o "$RUNNER_TEMP/out/game.ipa" \
             --work-dir "$RUNNER_TEMP/work" \
-            --romfs separate \
-            --keep-extracted \
+            --romfs "$ROMFS_MODE" \
+            $KEEP_FLAG \
             --progress lines
 
       - name: Upload IPA
