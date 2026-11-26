@@ -21,10 +21,13 @@ jobs:
   extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Install tools
+      - name: Install tools & Build hactool
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git
           pip install gdown nsz
+          git clone --depth 1 https://github.com/SciresM/hactool.git
+          cd hactool && cp config.mk.template config.mk && make -j$(nproc)
+          sudo cp hactool /usr/local/bin/
 
       - name: Download files
         env:
@@ -62,26 +65,22 @@ jobs:
             nsz -D "$f" -o work/game && rm -f "$f"
           done
 
-      - name: Download hactool & Extract RomFS
+      - name: Extract RomFS & Inspect Files
         run: |
-          wget -q https://github.com/SciresM/hactool/releases/download/1.4.0/hactool-1.4.0-linux.tar.gz
-          tar -xzf hactool-1.4.0-linux.tar.gz
-          chmod +x hactool
-
           BASE_FILE=$(ls -S work/game/* | head -n 1)
           UPD_FILE=$(ls -S work/game/* | sed -n '2p')
 
           mkdir -p work/nca
-          ./hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca "$BASE_FILE" || ./hactool -k work/keys/prod.keys -t xci --securedir=work/nca "$BASE_FILE"
+          hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool -k work/keys/prod.keys -t xci --securedir=work/nca "$BASE_FILE"
           MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
 
           if [ -n "$UPD_FILE" ]; then
             mkdir -p work/nca_upd
-            ./hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
+            hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
             UPD_NCA=$(ls -S work/nca_upd/*.nca | head -n 1)
-            ./hactool -k work/keys/prod.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
+            hactool -k work/keys/prod.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
           else
-            ./hactool -k work/keys/prod.keys --romfsdir=work/romfs "$MAIN_NCA"
+            hactool -k work/keys/prod.keys --romfsdir=work/romfs "$MAIN_NCA"
           fi
 
           mkdir -p work/inspect
