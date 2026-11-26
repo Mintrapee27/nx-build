@@ -24,8 +24,9 @@ jobs:
     steps:
       - name: Install tools & Build hactool
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl jq
-          pip install gdown nsz
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl
+          pip install gdown nsz playwright
+          playwright install chromium
           git clone --depth 1 https://github.com/SciresM/hactool.git
           cd hactool && cp config.mk.template config.mk && make -j$(nproc)
           sudo cp hactool /usr/local/bin/
@@ -38,24 +39,34 @@ jobs:
         run: |
           mkdir -p work/raw work/game work/keys work/romfs
 
+          cat << 'EOF' > dl_gofile.py
+          import sys
+          from playwright.sync_api import sync_playwright
+
+          url = sys.argv[1]
+          out = sys.argv[2]
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              context = browser.new_context(accept_downloads=True)
+              page = context.new_page()
+              page.goto(url, wait_until="networkidle", timeout=60000)
+              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=30000)
+              with page.expect_download(timeout=0) as download_info:
+                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
+              download = download_info.value
+              download.save_as(out)
+              browser.close()
+          EOF
+
           download_file() {
             local url="$1"
             local out="$2"
             if [[ "$url" == *"drive.google.com"* ]]; then
               gdown "$url" -O "$out"
             elif [[ "$url" == *"gofile.io/d/"* ]]; then
-              CONTENT_ID=$(echo "$url" | sed -E 's|.*gofile\.io/d/([^/?#]+).*|\1|')
-              TOKEN=$(curl -s -X POST "https://api.gofile.io/accounts" | jq -r '.data.token')
-              WT=$(curl -s "https://gofile.io/dist/js/global.js" | grep -oE 'wt:\s*"[^"]+"' | cut -d'"' -f2)
-              [ -z "$WT" ] && WT="4fd6sg89d7s6"
-              RESP=$(curl -s -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: $WT" "https://api.gofile.io/contents/$CONTENT_ID")
-              DIRECT_URL=$(echo "$RESP" | jq -r '.data.children | to_entries[0].value.link // empty')
-              if [ -z "$DIRECT_URL" ]; then
-                echo "Gofile API response: $RESP"
-                exit 1
-              fi
-              echo "Downloading from Gofile..."
-              curl -L -f -H "Cookie: accountToken=$TOKEN" "$DIRECT_URL" -o "$out"
+              echo "Downloading from Gofile via headless browser..."
+              python3 dl_gofile.py "$url" "$out"
             else
               curl -L -f "$url" -o "$out"
             fi
