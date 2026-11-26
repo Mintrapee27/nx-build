@@ -76,14 +76,13 @@ jobs:
           download_file "$NSP_URL" work/raw/main_in
           ls -lh work/raw/main_in
 
-          # ใช้ Python เช็ก 4 ไบต์แรกของไฟล์ (IVFC = RomFS.img) แบบแม่นยำ 100%
-          IS_ROMFS=$(python3 -c 'f=open("work/raw/main_in","rb"); print("yes" if f.read(4)==b"IVFC" else "no")')
+          # ลองแตกแบบ RomFS.img ตรงๆ ก่อนเสมอ
+          echo "Trying direct RomFS extraction..."
+          hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in || true
 
-          if [ "$IS_ROMFS" = "yes" ]; then
-            echo "Detected RomFS.img! Extracting directly..."
-            hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in
-          else
-            echo "Detected Game Package (.nsp/.xci/.nsz)! Preparing prod.keys..."
+          # ถ้าโฟลเดอร์ work/romfs ยังว่างเปล่า แสดงว่าเป็นไฟล์ .nsp/.xci/.nsz ให้เข้าโหมดถอดรหัส
+          if [ -z "$(ls -A work/romfs)" ]; then
+            echo "Not a raw RomFS.img. Switching to Game Package decryption..."
             if [ -z "$KEYS_URL" ]; then
               echo "Error: keys_url is required for .nsp/.xci files!"
               exit 1
@@ -130,6 +129,8 @@ jobs:
             else
               hactool --romfsdir=work/romfs "$MAIN_NCA"
             fi
+          else
+            echo "Successfully extracted RomFS.img directly!"
           fi
 
           find work/romfs -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" \) -exec cp --parents {} work/inspect/ \;
