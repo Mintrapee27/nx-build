@@ -4,18 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile, Direct link, or Google Drive link for RomFS.img OR base game (.nsp/.xci/.nsz)'
+        description: 'Gofile, Direct link, or Google Drive link for base game (.nsp/.xci/.nsz) OR RomFS.img'
         required: true
         type: string
       update_url:
-        description: 'Optional: Link for Update file (leave blank if using RomFS.img)'
+        description: 'Link for Update file (leave blank if using RomFS.img)'
         required: false
-        default: ''
+        default: 'https://drive.google.com/file/d/1_cyvLZfiHaM1iVCS4aS4mwC5wc40eS5J/view?usp=drivesdk'
         type: string
       keys_url:
-        description: 'Optional: Link for prod.keys (leave blank if using RomFS.img)'
+        description: 'Link for prod.keys (leave blank if using RomFS.img)'
         required: false
-        default: ''
+        default: 'https://drive.google.com/file/d/1QAzpusGYqRGnrXi9fJhS4SAd3nGu0edO/view?usp=drivesdk'
         type: string
 
 jobs:
@@ -78,6 +78,10 @@ jobs:
           if hactool -t romfs --romfsdir=work/romfs work/raw/main_in >/dev/null 2>&1; then
             echo "Extracted directly from RomFS.img!"
           else
+            if [ -z "$KEYS_URL" ]; then
+              echo "Error: keys_url is required for .nsp/.xci files!"
+              exit 1
+            fi
             download_file "$KEYS_URL" work/raw/keys_in
             if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
               FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
