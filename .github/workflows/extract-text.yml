@@ -22,16 +22,14 @@ jobs:
   extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Install tools & Build nstool + hactool
+      - name: Install tools & Build hactool
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl cmake
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl
           pip install gdown nsz playwright
           playwright install chromium
-          git clone --depth 1 https://github.com/jakcron/nstool.git
-          cd nstool && make -j$(nproc) && sudo cp bin/nstool /usr/local/bin/
-          cd ..
           git clone --depth 1 https://github.com/SciresM/hactool.git
-          cd hactool && cp config.mk.template config.mk && make -j$(nproc) && sudo cp hactool /usr/local/bin/
+          cd hactool && cp config.mk.template config.mk && make -j$(nproc)
+          sudo cp hactool /usr/local/bin/
 
       - name: Download & Extract RomFS
         env:
@@ -61,6 +59,70 @@ jobs:
               browser.close()
           EOF
 
+          # สคริปต์ Python สำหรับแตก RomFS.img / IVFC โดยตรงแบบไม่ใช้คีย์
+          cat << 'EOF' > extract_romfs.py
+          import sys, os, struct
+
+          path = sys.argv[1]
+          outdir = sys.argv[2]
+
+          with open(path, "rb") as f:
+              data = f.read(0x10000)
+              pos = data.find(b"IVFC")
+              if pos == -1:
+                  # ลองเช็ก Raw RomFS header (header_size == 0x50)
+                  if len(data) >= 0x50 and struct.unpack("<Q", data[:8])[0] == 0x50:
+                      romfs_offset = 0
+                  else:
+                      sys.exit(1)
+              else:
+                  # อ่าน Level 6 offset จาก IVFC header
+                  lvl6_off = struct.unpack("<Q", data[pos+0x90:pos+0x98])[0]
+                  romfs_offset = pos + lvl6_off
+
+              f.seek(romfs_offset)
+              hdr = f.read(0x50)
+              hdr_len, dir_hash_off, dir_hash_sz, dir_meta_off, dir_meta_sz, file_hash_off, file_hash_sz, file_meta_off, file_meta_sz, data_off = struct.unpack("<10Q", hdr)
+              if hdr_len != 0x50:
+                  sys.exit(1)
+
+              f.seek(romfs_offset + dir_meta_off)
+              dir_meta = f.read(dir_meta_sz)
+              f.seek(romfs_offset + file_meta_off)
+              file_meta = f.read(file_meta_sz)
+
+              def walk_files(file_off, cur_path):
+                  while file_off != 0xFFFFFFFF:
+                      parent, sibling, d_off, d_sz, hash_next, name_len = struct.unpack("<IIQQII", file_meta[file_off:file_off+0x20])
+                      name = file_meta[file_off+0x20:file_off+0x20+name_len].decode("utf-8", errors="ignore")
+                      out_file = os.path.join(cur_path, name)
+                      os.makedirs(cur_path, exist_ok=True)
+                      f.seek(romfs_offset + data_off + d_off)
+                      with open(out_file, "wb") as out_f:
+                          rem = d_sz
+                          while rem > 0:
+                              chunk = f.read(min(rem, 1024*1024*8))
+                              if not chunk: break
+                              out_f.write(chunk)
+                              rem -= len(chunk)
+                      file_off = sibling
+
+              def walk_dir(dir_off, cur_path):
+                  while dir_off != 0xFFFFFFFF:
+                      parent, sibling, child_dir, child_file, hash_next, name_len = struct.unpack("<IIIIII", dir_meta[dir_off:dir_off+0x18])
+                      name = dir_meta[dir_off+0x18:dir_off+0x18+name_len].decode("utf-8", errors="ignore")
+                      next_path = os.path.join(cur_path, name) if name else cur_path
+                      os.makedirs(next_path, exist_ok=True)
+                      if child_file != 0xFFFFFFFF:
+                          walk_files(child_file, next_path)
+                      if child_dir != 0xFFFFFFFF:
+                          walk_dir(child_dir, next_path)
+                      dir_off = sibling
+
+              walk_dir(0, outdir)
+              print("Successfully extracted RomFS via Python!")
+          EOF
+
           download_file() {
             local url="$1"
             local out="$2"
@@ -78,12 +140,23 @@ jobs:
           download_file "$NSP_URL" work/raw/main_in
           ls -lh work/raw/main_in
 
-          # ใช้ nstool แตก RomFS.img ตรงๆ (รองรับทั้ง IVFC และ Raw RomFS โดยไม่แครช)
-          echo "Trying direct RomFS extraction with nstool..."
-          nstool -t romfs -x work/romfs work/raw/main_in || true
+          # 1. ลองแตก RomFS.img ตรงๆ ด้วย Python RomFS Extractor
+          echo "Trying direct RomFS extraction..."
+          python3 extract_romfs.py work/raw/main_in work/romfs || true
 
+          # 2. ถ้ายังไม่ออก ลองใช้ 7z แตกดูเผื่อเป็นไฟล์ซิปหรืออิมเมจมาตรฐาน
           if [ -z "$(ls -A work/romfs)" ]; then
-            echo "Not a raw RomFS.img. Switching to Game Package decryption..."
+            7z x work/raw/main_in -owork/romfs -y >/dev/null 2>&1 || true
+            # เช็กว่าข้างในเป็นไฟล์ .nsp หรือไม่ ถ้าใช่ให้ย้ายไปโหมดถอดรหัสเกม
+            if ls work/romfs/*.nsp work/romfs/*.xci work/romfs/*.nsz >/dev/null 2>&1; then
+              mv work/romfs/* work/game/
+              rm -rf work/romfs/*
+            fi
+          fi
+
+          # 3. ถ้าโฟลเดอร์ work/romfs ยังว่างเปล่า แสดงว่าเป็นไฟล์ .nsp/.xci/.nsz ให้เข้าโหมดถอดรหัสด้วย prod.keys
+          if [ -z "$(ls -A work/romfs)" ]; then
+            echo "Detected Game Package! Switching to decryption..."
             if [ -z "$KEYS_URL" ]; then
               echo "Error: keys_url is required for .nsp/.xci files!"
               exit 1
@@ -100,8 +173,10 @@ jobs:
               exit 1
             fi
 
-            if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
-              mv work/raw/main_in work/game/base.nsp
+            if [ -z "$(ls -A work/game)" ]; then
+              if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
+                mv work/raw/main_in work/game/base.nsp
+              fi
             fi
 
             if [ -n "$UPDATE_URL" ]; then
@@ -130,8 +205,6 @@ jobs:
             else
               hactool --romfsdir=work/romfs "$MAIN_NCA"
             fi
-          else
-            echo "Successfully extracted RomFS.img with nstool!"
           fi
 
           find work/romfs -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" \) -exec cp --parents {} work/inspect/ \;
