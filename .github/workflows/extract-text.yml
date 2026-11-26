@@ -4,17 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Google Drive link for base game (.nsp/.xci/.nsz)'
+        description: 'Gofile, Direct link, or Google Drive link for RomFS.img OR base game (.nsp/.xci/.nsz)'
         required: true
         type: string
       update_url:
-        description: 'Optional: Google Drive link for Update file'
+        description: 'Optional: Link for Update file (leave blank if using RomFS.img)'
         required: false
         default: ''
         type: string
       keys_url:
-        description: 'Google Drive link for prod.keys'
-        required: true
+        description: 'Optional: Link for prod.keys (leave blank if using RomFS.img)'
+        required: false
+        default: ''
         type: string
 
 jobs:
@@ -23,13 +24,13 @@ jobs:
     steps:
       - name: Install tools & Build hactool
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl jq
           pip install gdown nsz
           git clone --depth 1 https://github.com/SciresM/hactool.git
           cd hactool && cp config.mk.template config.mk && make -j$(nproc)
           sudo cp hactool /usr/local/bin/
 
-      - name: Download files
+      - name: Download & Extract RomFS
         env:
           NSP_URL: ${{ inputs.nsp_url }}
           UPDATE_URL: ${{ inputs.update_url }}
@@ -37,50 +38,66 @@ jobs:
         run: |
           mkdir -p work/raw work/game work/keys work/romfs
 
-          # โหลดและจัดการ keys
-          gdown "$KEYS_URL" -O work/raw/keys_in
-          if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
-            FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
-            [ -n "$FOUND_KEYS" ] && [ "$FOUND_KEYS" != "work/keys/prod.keys" ] && cp "$FOUND_KEYS" work/keys/prod.keys
-          else
-            cp work/raw/keys_in work/keys/prod.keys
-          fi
-
-          # โหลดและจัดการไฟล์เกมหลัก
-          gdown "$NSP_URL" -O work/raw/base_in
-          if ! 7z x work/raw/base_in -owork/game -y >/dev/null 2>&1; then
-            mv work/raw/base_in work/game/base.nsp
-          fi
-
-          # โหลดและจัดการไฟล์อัปเดต (ถ้ามี)
-          if [ -n "$UPDATE_URL" ]; then
-            gdown "$UPDATE_URL" -O work/raw/upd_in
-            if ! 7z x work/raw/upd_in -owork/game -y >/dev/null 2>&1; then
-              mv work/raw/upd_in work/game/upd.nsp
+          download_file() {
+            local url="$1"
+            local out="$2"
+            if [[ "$url" == *"drive.google.com"* ]]; then
+              gdown "$url" -O "$out"
+            elif [[ "$url" == *"gofile.io/d/"* ]]; then
+              CONTENT_ID=$(echo "$url" | sed -E 's|.*gofile\.io/d/([^/?#]+).*|\1|')
+              TOKEN=$(curl -s -X POST "https://api.gofile.io/accounts" | jq -r '.data.token')
+              DIRECT_URL=$(curl -s -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: 4fd6sg89d7s6" "https://api.gofile.io/contents/$CONTENT_ID" | jq -r '.data.children | to_entries[0].value.link')
+              echo "Downloading from Gofile direct link..."
+              curl -L -f -H "Cookie: accountToken=$TOKEN" "$DIRECT_URL" -o "$out"
+            else
+              curl -L -f "$url" -o "$out"
             fi
-          fi
+          }
 
-          # แตกไฟล์ nsz/xcz ถ้ามี
-          find work/game -iname "*.nsz" -o -iname "*.xcz" | while read -r f; do
-            nsz -D "$f" -o work/game && rm -f "$f"
-          done
+          download_file "$NSP_URL" work/raw/main_in
 
-      - name: Extract RomFS & Inspect Files
-        run: |
-          BASE_FILE=$(ls -S work/game/* | head -n 1)
-          UPD_FILE=$(ls -S work/game/* | sed -n '2p')
-
-          mkdir -p work/nca
-          hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool -k work/keys/prod.keys -t xci --securedir=work/nca "$BASE_FILE"
-          MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
-
-          if [ -n "$UPD_FILE" ]; then
-            mkdir -p work/nca_upd
-            hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
-            UPD_NCA=$(ls -S work/nca_upd/*.nca | head -n 1)
-            hactool -k work/keys/prod.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
+          # เช็กว่าเป็นไฟล์ RomFS.img อยู่แล้วหรือไม่
+          if hactool -t romfs --romfsdir=work/romfs work/raw/main_in >/dev/null 2>&1; then
+            echo "Extracted directly from RomFS.img!"
           else
-            hactool -k work/keys/prod.keys --romfsdir=work/romfs "$MAIN_NCA"
+            download_file "$KEYS_URL" work/raw/keys_in
+            if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
+              FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
+              [ -n "$FOUND_KEYS" ] && [ "$FOUND_KEYS" != "work/keys/prod.keys" ] && cp "$FOUND_KEYS" work/keys/prod.keys
+            else
+              cp work/raw/keys_in work/keys/prod.keys
+            fi
+
+            if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
+              mv work/raw/main_in work/game/base.nsp
+            fi
+
+            if [ -n "$UPDATE_URL" ]; then
+              download_file "$UPDATE_URL" work/raw/upd_in
+              if ! 7z x work/raw/upd_in -owork/game -y >/dev/null 2>&1; then
+                mv work/raw/upd_in work/game/upd.nsp
+              fi
+            fi
+
+            find work/game -iname "*.nsz" -o -iname "*.xcz" | while read -r f; do
+              nsz -D "$f" -o work/game && rm -f "$f"
+            done
+
+            BASE_FILE=$(ls -S work/game/* | head -n 1)
+            UPD_FILE=$(ls -S work/game/* | sed -n '2p')
+
+            mkdir -p work/nca
+            hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool -k work/keys/prod.keys -t xci --securedir=work/nca "$BASE_FILE"
+            MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
+
+            if [ -n "$UPD_FILE" ]; then
+              mkdir -p work/nca_upd
+              hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
+              UPD_NCA=$(ls -S work/nca_upd/*.nca | head -n 1)
+              hactool -k work/keys/prod.keys --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
+            else
+              hactool -k work/keys/prod.keys --romfsdir=work/romfs "$MAIN_NCA"
+            fi
           fi
 
           mkdir -p work/inspect
