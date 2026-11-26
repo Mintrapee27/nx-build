@@ -35,7 +35,7 @@ jobs:
       - name: Install tools & Build hactool for Linux
         run: |
           sudo apt-get update && sudo apt-get install -y p7zip-full unar xxd curl build-essential git
-          python -m pip install gdown nsz playwright
+          python -m pip install lz4 "capstone>=5,<6" fonttools zbic gdown nsz playwright
           playwright install chromium
           git clone --depth 1 https://github.com/SciresM/hactool.git "$RUNNER_TEMP/hactool_src"
           cd "$RUNNER_TEMP/hactool_src" && cp config.mk.template config.mk && make -j$(nproc)
@@ -92,7 +92,7 @@ jobs:
             sig6=$(head -c 6 "$src" | xxd -p | tr -d '\n')
             sig4="${sig6:0:8}"
 
-            if [ "$sig6" = "377abcaf271c" ] || [ "$sig4" = "504b0304" ] || [ "$sig4" = "504b0506" ] || [ "$sig4" = "504b0708" ]; then
+            if [ "$sig6" = "377abcaf271c" ] \vert{}\vert{} [ "$sig4" = "504b0304" ] || [ "$sig4" = "504b0506" ] \vert{}\vert{} [ "$sig4" = "504b0708" ]; then
               7z x "$src" -o"$out_dir" -y
               rm -f "$src"
             elif [ "$sig6" = "526172211a07" ]; then
@@ -114,13 +114,28 @@ jobs:
             fi
           }
 
-          # 1. เตรียม prod.keys (เก็บในพื้นที่ชั่วคราวและไม่แสดงค่าใน Log)
+          # 1. โหลดและทำความสะอาด prod.keys (คัดเฉพาะคีย์ 32/64 hex digits และไม่แสดงค่าใน Log)
           download_file "$KEYS_URL" "$RUNNER_TEMP/raw/keys_in"
           process_file "$RUNNER_TEMP/raw/keys_in" "$RUNNER_TEMP/keys_extract" "keys"
           FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*prod*.keys" | head -n 1)
           [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*.keys" | head -n 1)
           [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f | head -n 1)
-          cp "$FOUND_KEYS" "$HOME/.switch/prod.keys"
+
+          python3 - "$FOUND_KEYS" "$HOME/.switch/prod.keys" << 'EOF'
+          import sys, re
+          src, dst = sys.argv[1], sys.argv[2]
+          valid = []
+          with open(src, "r", encoding="utf-8", errors="ignore") as f:
+              for line in f:
+                  m = re.match(r"^\s*([a-zA-Z0-9_]+)\s*=\s*([0-9a-fA-F]+)\s*$", line)
+                  if m:
+                      k, v = m.group(1), m.group(2).lower()
+                      if len(v) in (32, 64) and "rsa" not in k:
+                          valid.append(f"{k} = {v}\n")
+          with open(dst, "w", encoding="utf-8") as out:
+              out.writelines(valid)
+          print(f"Sanitized prod.keys: {len(valid)} valid keys loaded.")
+          EOF
 
           # 2. โหลดไฟล์เกมหลักและไฟล์อัปเดต
           download_file "$NSP_URL" "$RUNNER_TEMP/raw/base_in"
@@ -130,54 +145,4 @@ jobs:
           for url in $(echo "$EXTRA_URLS" | tr ',' ' '); do
             [ -z "$url" ] && continue
             download_file "$url" "$RUNNER_TEMP/raw/extra_${i}_in"
-            process_file "$RUNNER_TEMP/raw/extra_${i}_in" "$RUNNER_TEMP/game" "extra_${i}"
-            i=$((i + 1))
-          done
-
-          find "$RUNNER_TEMP/game" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv -n {} "$RUNNER_TEMP/game/" \;
-
-          if find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | grep -q .; then
-            find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | while read -r comp_file; do
-              nsz -D "$comp_file" -o "$RUNNER_TEMP/game"
-              rm -f "$comp_file"
-            done
-          fi
-
-          # 3. ตรวจสอบและแตกไฟล์ทุกตัวใน game/ ด้วย hactool (Linux Native)
-          mkdir -p "$RUNNER_TEMP/nca_base" "$RUNNER_TEMP/nca_upd" "$RUNNER_TEMP/romfs"
-          for f in "$RUNNER_TEMP/game"/*; do
-            echo "Inspecting $(basename "$f") ($(du -h "$f" | cut -f1))..."
-            xxd -l 32 "$f"
-            if [[ "$(basename "$f")" == extra_* ]]; then
-              hactool --intype=pfs0 --pfs0dir="$RUNNER_TEMP/nca_upd" "$f" || true
-            else
-              hactool --intype=pfs0 --pfs0dir="$RUNNER_TEMP/nca_base" "$f" || \
-              hactool --intype=xci --securedir="$RUNNER_TEMP/nca_base" "$f" || \
-              7z x "$f" -o"$RUNNER_TEMP/romfs" -y >/dev/null 2>&1 || true
-            fi
-          done
-
-          # 4. แตก RomFS จาก NCA หลัก (และรวมแพตช์ Update ถ้ามี)
-          MAIN_NCA=$(ls -S "$RUNNER_TEMP/nca_base"/*.nca 2>/dev/null | head -n 1 || true)
-          UPD_NCA=$(ls -S "$RUNNER_TEMP/nca_upd"/*.nca 2>/dev/null | head -n 1 || true)
-
-          if [ -n "$MAIN_NCA" ] && [ -n "$UPD_NCA" ]; then
-            echo "Extracting Base + Update RomFS..."
-            hactool --basenca="$MAIN_NCA" --romfsdir="$RUNNER_TEMP/romfs" "$UPD_NCA"
-          elif [ -n "$MAIN_NCA" ]; then
-            echo "Extracting Base RomFS..."
-            hactool --romfsdir="$RUNNER_TEMP/romfs" "$MAIN_NCA"
-          elif [ -n "$UPD_NCA" ]; then
-            echo "Extracting Update RomFS..."
-            hactool --romfsdir="$RUNNER_TEMP/romfs" "$UPD_NCA"
-          fi
-
-          # 5. คัดไฟล์ข้อความและฟอนต์ทั้งหมดเข้าโฟลเดอร์ inspect
-          find "$RUNNER_TEMP/romfs" -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" -o -iname "*.json" -o -iname "*.txt" -o -iname "*.bin" \) -exec cp --parents {} "$RUNNER_TEMP/inspect/" \;
-          ls -lh "$RUNNER_TEMP/inspect"
-
-      - name: Upload Inspect Files
-        uses: actions/upload-artifact@v4
-        with:
-          name: text-and-fonts
-          path: ${{ runner.temp }}/inspect/
+            process_file "$RUNNER_TEMP/raw/extra_${i}_in
