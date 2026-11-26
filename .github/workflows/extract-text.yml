@@ -33,19 +33,31 @@ jobs:
           KEYS_URL: ${{ inputs.keys_url }}
         run: |
           mkdir -p work/raw work/game work/keys work/romfs
-          gdown "$KEYS_URL" -O work/raw/keys_in
-          7z x work/raw/keys_in -owork/keys -y || cp work/raw/keys_in work/keys/prod.keys
-          FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
-          [ -n "$FOUND_KEYS" ] && cp "$FOUND_KEYS" work/keys/prod.keys
 
-          gdown "$NSP_URL" -O work/raw/base_in
-          7z x work/raw/base_in -owork/game -y || mv work/raw/base_in work/game/base.nsp
-
-          if [ -n "$UPDATE_URL" ]; then
-            gdown "$UPDATE_URL" -O work/raw/upd_in
-            7z x work/raw/upd_in -owork/game -y || mv work/raw/upd_in work/game/upd.nsp
+          # โหลดและจัดการ keys
+          gdown --fuzzy "$KEYS_URL" -O work/raw/keys_in
+          if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
+            FOUND_KEYS=$(find work/keys -iname "*prod*.keys" | head -n 1)
+            [ -n "$FOUND_KEYS" ] && [ "$FOUND_KEYS" != "work/keys/prod.keys" ] && cp "$FOUND_KEYS" work/keys/prod.keys
+          else
+            cp work/raw/keys_in work/keys/prod.keys
           fi
 
+          # โหลดและจัดการไฟล์เกมหลัก
+          gdown --fuzzy "$NSP_URL" -O work/raw/base_in
+          if ! 7z x work/raw/base_in -owork/game -y >/dev/null 2>&1; then
+            mv work/raw/base_in work/game/base.nsp
+          fi
+
+          # โหลดและจัดการไฟล์อัปเดต (ถ้ามี)
+          if [ -n "$UPDATE_URL" ]; then
+            gdown --fuzzy "$UPDATE_URL" -O work/raw/upd_in
+            if ! 7z x work/raw/upd_in -owork/game -y >/dev/null 2>&1; then
+              mv work/raw/upd_in work/game/upd.nsp
+            fi
+          fi
+
+          # แตกไฟล์ nsz/xcz ถ้ามี
           find work/game -iname "*.nsz" -o -iname "*.xcz" | while read -r f; do
             nsz -D "$f" -o work/game && rm -f "$f"
           done
@@ -59,7 +71,6 @@ jobs:
           BASE_FILE=$(ls -S work/game/* | head -n 1)
           UPD_FILE=$(ls -S work/game/* | sed -n '2p')
 
-          # แตก NCA ที่ใหญ่ที่สุด (Main RomFS)
           mkdir -p work/nca
           ./hactool -k work/keys/prod.keys -t pfs0 --pfs0dir=work/nca "$BASE_FILE" || ./hactool -k work/keys/prod.keys -t xci --securedir=work/nca "$BASE_FILE"
           MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
@@ -73,7 +84,6 @@ jobs:
             ./hactool -k work/keys/prod.keys --romfsdir=work/romfs "$MAIN_NCA"
           fi
 
-          # คัดแยกเฉพาะไฟล์ข้อความ (message) และไฟล์ฟอนต์ออกมาดูโครงสร้าง
           mkdir -p work/inspect
           find work/romfs -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" \) -exec cp --parents {} work/inspect/ \;
           ls -lh work/inspect/work/romfs/
