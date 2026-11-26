@@ -46,8 +46,15 @@ jobs:
             elif [[ "$url" == *"gofile.io/d/"* ]]; then
               CONTENT_ID=$(echo "$url" | sed -E 's|.*gofile\.io/d/([^/?#]+).*|\1|')
               TOKEN=$(curl -s -X POST "https://api.gofile.io/accounts" | jq -r '.data.token')
-              DIRECT_URL=$(curl -s -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: 4fd6sg89d7s6" "https://api.gofile.io/contents/$CONTENT_ID" | jq -r '.data.children | to_entries[0].value.link')
-              echo "Downloading from Gofile direct link..."
+              WT=$(curl -s "https://gofile.io/dist/js/global.js" | grep -oE 'wt:\s*"[^"]+"' | cut -d'"' -f2)
+              [ -z "$WT" ] && WT="4fd6sg89d7s6"
+              RESP=$(curl -s -H "Authorization: Bearer $TOKEN" -H "X-Website-Token: $WT" "https://api.gofile.io/contents/$CONTENT_ID")
+              DIRECT_URL=$(echo "$RESP" | jq -r '.data.children | to_entries[0].value.link // empty')
+              if [ -z "$DIRECT_URL" ]; then
+                echo "Gofile API response: $RESP"
+                exit 1
+              fi
+              echo "Downloading from Gofile..."
               curl -L -f -H "Cookie: accountToken=$TOKEN" "$DIRECT_URL" -o "$out"
             else
               curl -L -f "$url" -o "$out"
