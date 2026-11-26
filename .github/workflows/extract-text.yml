@@ -13,7 +13,7 @@ on:
         default: ''
         type: string
       keys_url:
-        description: 'Gofile or Google Drive link for prod.keys (not stored on GitHub)'
+        description: 'Gofile or Google Drive link for prod.keys (leave blank if using RomFS.img)'
         required: false
         default: ''
         type: string
@@ -76,13 +76,14 @@ jobs:
           download_file "$NSP_URL" work/raw/main_in
           ls -lh work/raw/main_in
 
-          # เช็กว่าเป็น RomFS.img โดยตรงหรือไม่
-          MAGIC=$(head -c 4 work/raw/main_in | tr -d '\0')
-          if [ "$MAGIC" = "IVFC" ]; then
+          # ใช้ Python เช็ก 4 ไบต์แรกของไฟล์ (IVFC = RomFS.img) แบบแม่นยำ 100%
+          IS_ROMFS=$(python3 -c 'f=open("work/raw/main_in","rb"); print("yes" if f.read(4)==b"IVFC" else "no")')
+
+          if [ "$IS_ROMFS" = "yes" ]; then
             echo "Detected RomFS.img! Extracting directly..."
             hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in
           else
-            echo "Detected Game Package! Preparing prod.keys..."
+            echo "Detected Game Package (.nsp/.xci/.nsz)! Preparing prod.keys..."
             if [ -z "$KEYS_URL" ]; then
               echo "Error: keys_url is required for .nsp/.xci files!"
               exit 1
@@ -91,7 +92,6 @@ jobs:
             download_file "$KEYS_URL" work/raw/keys_in
             7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1 || cp work/raw/keys_in work/keys/raw.keys
 
-            # คัดเฉพาะบรรทัดคีย์ที่สมบูรณ์และวางลง ~/.switch/prod.keys
             find work/keys -type f -exec grep -hE '^[a-zA-Z0-9_]+\s*=\s*[0-9a-fA-F]{32,}' {} + | tr -d '\r' > ~/.switch/prod.keys
             echo "Loaded $(wc -l < ~/.switch/prod.keys) valid keys into ~/.switch/prod.keys"
 
