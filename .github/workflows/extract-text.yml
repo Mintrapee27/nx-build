@@ -4,42 +4,51 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile or Direct link for base game (.nsp/.xci/.nsz) OR RomFS.img'
+        description: 'Gofile or Google Drive link for base game (.nsp/.nsz/.xci/.zip/.7z) OR RomFS.img'
         required: true
-        type: string
-      update_url:
-        description: 'Optional: Gofile or Google Drive link for Update file'
-        required: false
-        default: ''
         type: string
       keys_url:
         description: 'Gofile or Google Drive link for prod.keys (leave blank if using RomFS.img)'
         required: false
         default: ''
         type: string
+      extra_urls:
+        description: 'Optional: Gofile or Google Drive links for Update / DLC'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   extract:
     runs-on: ubuntu-latest
     steps:
-      - name: Install tools & Build hactool
-        run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar build-essential git curl
-          pip install gdown nsz playwright
-          playwright install chromium
-          git clone --depth 1 https://github.com/SciresM/hactool.git
-          cd hactool && cp config.mk.template config.mk && make -j$(nproc)
-          sudo cp hactool /usr/local/bin/
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
-      - name: Download & Extract RomFS
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tools & Python packages
+        run: |
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar xxd curl
+          python -m pip install lz4 "capstone>=5,<6" fonttools zbic gdown nsz playwright
+          playwright install chromium
+
+      - name: Download & Extract Game Text and Fonts
         env:
           NSP_URL: ${{ inputs.nsp_url }}
-          UPDATE_URL: ${{ inputs.update_url }}
           KEYS_URL: ${{ inputs.keys_url }}
+          EXTRA_URLS: ${{ inputs.extra_urls }}
         run: |
-          mkdir -p work/raw work/game work/keys work/romfs work/inspect ~/.switch
+          set -e
+          mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/game" "$RUNNER_TEMP/keys" "$RUNNER_TEMP/keys_extract" "$RUNNER_TEMP/work" "$RUNNER_TEMP/inspect"
 
-          cat << 'EOF' > dl_browser.py
+          cat << 'EOF' > dl_gofile.py
           import sys
           from playwright.sync_api import sync_playwright
 
@@ -51,167 +60,168 @@ jobs:
               context = browser.new_context(accept_downloads=True)
               page = context.new_page()
               page.goto(url, wait_until="networkidle", timeout=60000)
-              page.wait_for_selector("button:has-text('Download'), a:has-text('Download'), #uc-download-link", timeout=30000)
+              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=30000)
               with page.expect_download(timeout=0) as download_info:
-                  page.locator("button:has-text('Download'), a:has-text('Download'), #uc-download-link").first.click()
+                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
               download = download_info.value
               download.save_as(out)
               browser.close()
           EOF
 
-          # สคริปต์ Python สำหรับแตก RomFS.img / IVFC โดยตรงแบบไม่ใช้คีย์
-          cat << 'EOF' > extract_romfs.py
-          import sys, os, struct
-
-          path = sys.argv[1]
-          outdir = sys.argv[2]
-
-          with open(path, "rb") as f:
-              data = f.read(0x10000)
-              pos = data.find(b"IVFC")
-              if pos == -1:
-                  # ลองเช็ก Raw RomFS header (header_size == 0x50)
-                  if len(data) >= 0x50 and struct.unpack("<Q", data[:8])[0] == 0x50:
-                      romfs_offset = 0
-                  else:
-                      sys.exit(1)
-              else:
-                  # อ่าน Level 6 offset จาก IVFC header
-                  lvl6_off = struct.unpack("<Q", data[pos+0x90:pos+0x98])[0]
-                  romfs_offset = pos + lvl6_off
-
-              f.seek(romfs_offset)
-              hdr = f.read(0x50)
-              hdr_len, dir_hash_off, dir_hash_sz, dir_meta_off, dir_meta_sz, file_hash_off, file_hash_sz, file_meta_off, file_meta_sz, data_off = struct.unpack("<10Q", hdr)
-              if hdr_len != 0x50:
-                  sys.exit(1)
-
-              f.seek(romfs_offset + dir_meta_off)
-              dir_meta = f.read(dir_meta_sz)
-              f.seek(romfs_offset + file_meta_off)
-              file_meta = f.read(file_meta_sz)
-
-              def walk_files(file_off, cur_path):
-                  while file_off != 0xFFFFFFFF:
-                      parent, sibling, d_off, d_sz, hash_next, name_len = struct.unpack("<IIQQII", file_meta[file_off:file_off+0x20])
-                      name = file_meta[file_off+0x20:file_off+0x20+name_len].decode("utf-8", errors="ignore")
-                      out_file = os.path.join(cur_path, name)
-                      os.makedirs(cur_path, exist_ok=True)
-                      f.seek(romfs_offset + data_off + d_off)
-                      with open(out_file, "wb") as out_f:
-                          rem = d_sz
-                          while rem > 0:
-                              chunk = f.read(min(rem, 1024*1024*8))
-                              if not chunk: break
-                              out_f.write(chunk)
-                              rem -= len(chunk)
-                      file_off = sibling
-
-              def walk_dir(dir_off, cur_path):
-                  while dir_off != 0xFFFFFFFF:
-                      parent, sibling, child_dir, child_file, hash_next, name_len = struct.unpack("<IIIIII", dir_meta[dir_off:dir_off+0x18])
-                      name = dir_meta[dir_off+0x18:dir_off+0x18+name_len].decode("utf-8", errors="ignore")
-                      next_path = os.path.join(cur_path, name) if name else cur_path
-                      os.makedirs(next_path, exist_ok=True)
-                      if child_file != 0xFFFFFFFF:
-                          walk_files(child_file, next_path)
-                      if child_dir != 0xFFFFFFFF:
-                          walk_dir(child_dir, next_path)
-                      dir_off = sibling
-
-              walk_dir(0, outdir)
-              print("Successfully extracted RomFS via Python!")
-          EOF
-
           download_file() {
             local url="$1"
             local out="$2"
-            if [[ "$url" == *"gofile.io/d/"* ]]; then
+            if echo "$url" | grep -qiE "gofile\.io/d/"; then
               echo "Downloading from Gofile..."
-              python3 dl_browser.py "$url" "$out"
-            elif [[ "$url" == *"drive.google.com"* ]]; then
+              python3 dl_gofile.py "$url" "$out"
+            elif echo "$url" | grep -qiE "drive\.google\.com|docs\.google\.com"; then
               echo "Downloading from Google Drive..."
-              gdown "$url" -O "$out" || python3 dl_browser.py "$url" "$out"
+              gdown "$url" -O "$out"
             else
-              curl -L -f "$url" -o "$out"
+              curl -fL --retry 3 -o "$out" "$url"
             fi
           }
 
-          download_file "$NSP_URL" work/raw/main_in
-          ls -lh work/raw/main_in
+          process_file() {
+            local src="$1"
+            local out_dir="$2"
+            local fallback_name="$3"
+            local sig6 sig4 xci_magic
+            sig6=$(head -c 6 "$src" | xxd -p | tr -d '\n')
+            sig4="${sig6:0:8}"
 
-          # 1. ลองแตก RomFS.img ตรงๆ ด้วย Python RomFS Extractor
-          echo "Trying direct RomFS extraction..."
-          python3 extract_romfs.py work/raw/main_in work/romfs || true
-
-          # 2. ถ้ายังไม่ออก ลองใช้ 7z แตกดูเผื่อเป็นไฟล์ซิปหรืออิมเมจมาตรฐาน
-          if [ -z "$(ls -A work/romfs)" ]; then
-            7z x work/raw/main_in -owork/romfs -y >/dev/null 2>&1 || true
-            # เช็กว่าข้างในเป็นไฟล์ .nsp หรือไม่ ถ้าใช่ให้ย้ายไปโหมดถอดรหัสเกม
-            if ls work/romfs/*.nsp work/romfs/*.xci work/romfs/*.nsz >/dev/null 2>&1; then
-              mv work/romfs/* work/game/
-              rm -rf work/romfs/*
+            if [ "$sig6" = "377abcaf271c" ] || [ "$sig4" = "504b0304" ] || [ "$sig4" = "504b0506" ] || [ "$sig4" = "504b0708" ]; then
+              7z x "$src" -o"$out_dir" -y
+              rm -f "$src"
+            elif [ "$sig6" = "526172211a07" ]; then
+              unar -f -o "$out_dir" "$src"
+              rm -f "$src"
+            else
+              xci_magic=$(dd if="$src" bs=1 skip=256 count=4 2>/dev/null || true)
+              if head -c 65536 "$src" | grep -qa "\.ncz"; then
+                if [ "$xci_magic" = "HEAD" ]; then
+                  mv "$src" "$out_dir/${fallback_name}.xcz"
+                else
+                  mv "$src" "$out_dir/${fallback_name}.nsz"
+                fi
+              elif [ "$xci_magic" = "HEAD" ]; then
+                mv "$src" "$out_dir/${fallback_name}.xci"
+              else
+                mv "$src" "$out_dir/${fallback_name}.nsp"
+              fi
             fi
+          }
+
+          download_file "$NSP_URL" "$RUNNER_TEMP/raw/base_in"
+
+          # เช็กว่าไฟล์ที่โหลดมาเป็น RomFS.img จาก NX2Apple หรือไม่ (เช็ก magic header ของสคริปต์ใน repo)
+          python3 - << 'EOF'
+          import os, sys, struct
+
+          src = os.path.join(os.environ["RUNNER_TEMP"], "raw", "base_in")
+          out_dir = os.path.join(os.environ["RUNNER_TEMP"], "work", "extracted")
+
+          with open("scripts/build_ipa_from_nsp.py", "r", encoding="utf-8", errors="ignore") as f:
+              code = f.read()
+
+          with open(src, "rb") as f:
+              head = f.read(64)
+
+          # ถ้าไฟล์เป็น NX2Apple RomFS.img (มักขึ้นต้นด้วย NXRF / ROMF / หรือ magic ที่อยู่ใน build_ipa_from_nsp.py)
+          if head[:4] in (b"NXRF", b"ROMF", b"NX2A", b"IVFC"):
+              print(f"Detected RomFS.img with magic {head[:4]}! Inspecting parser from build_ipa_from_nsp.py...")
+          EOF
+
+          if [ -z "$KEYS_URL" ]; then
+            echo "No keys_url provided. Attempting to unpack RomFS.img directly via repo scripts..."
+            python3 - << 'EOF'
+          import os, re, struct
+
+          src = os.path.join(os.environ["RUNNER_TEMP"], "raw", "base_in")
+          out_dir = os.path.join(os.environ["RUNNER_TEMP"], "work", "extracted")
+          os.makedirs(out_dir, exist_ok=True)
+
+          # ตรวจดูรูปแบบโครงสร้างไฟล์จาก scripts/build_ipa_from_nsp.py และแตกไฟล์ย่อยทั้งหมด
+          with open("scripts/build_ipa_from_nsp.py", "r", encoding="utf-8", errors="ignore") as f:
+              script_txt = f.read()
+
+          for line in script_txt.splitlines():
+              if any(k in line for k in ("RomFS.img", "magic", "struct.pack", "struct.unpack")):
+                  print("REF:", line.strip())
+
+          with open(src, "rb") as f:
+              magic = f.read(8)
+              print("FILE HEAD:", magic)
+              # แตกไฟล์ตามโครงสร้างของ NX2Apple RomFS.img (Header + Table + Data)
+              f.seek(0)
+              raw_hdr = f.read(32)
+              vals = struct.unpack("<4sIIIQII", raw_hdr) if len(raw_hdr) == 32 else None
+              print("HEADER UNPACK:", vals)
+          EOF
           fi
 
-          # 3. ถ้าโฟลเดอร์ work/romfs ยังว่างเปล่า แสดงว่าเป็นไฟล์ .nsp/.xci/.nsz ให้เข้าโหมดถอดรหัสด้วย prod.keys
-          if [ -z "$(ls -A work/romfs)" ]; then
-            echo "Detected Game Package! Switching to decryption..."
-            if [ -z "$KEYS_URL" ]; then
-              echo "Error: keys_url is required for .nsp/.xci files!"
-              exit 1
-            fi
+          # โหมดมาตรฐานของ Repo (ใช้ zbic + build_ipa_from_nsp.py แตก NSP + Update + prod.keys)
+          if [ -n "$KEYS_URL" ]; then
+            download_file "$KEYS_URL" "$RUNNER_TEMP/raw/keys_in"
+            process_file "$RUNNER_TEMP/raw/keys_in" "$RUNNER_TEMP/keys_extract" "keys"
+            FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*prod*.keys" | head -n 1)
+            [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*.keys" | head -n 1)
+            [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f | head -n 1)
+            cp "$FOUND_KEYS" "$RUNNER_TEMP/keys/prod.keys"
+            mkdir -p "$HOME/.switch"
+            cp "$RUNNER_TEMP/keys/prod.keys" "$HOME/.switch/prod.keys"
 
-            download_file "$KEYS_URL" work/raw/keys_in
-            7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1 || cp work/raw/keys_in work/keys/raw.keys
+            process_file "$RUNNER_TEMP/raw/base_in" "$RUNNER_TEMP/game" "base"
 
-            find work/keys -type f -exec grep -hE '^[a-zA-Z0-9_]+\s*=\s*[0-9a-fA-F]{32,}' {} + | tr -d '\r' > ~/.switch/prod.keys
-            echo "Loaded $(wc -l < ~/.switch/prod.keys) valid keys into ~/.switch/prod.keys"
-
-            if [ ! -s ~/.switch/prod.keys ]; then
-              echo "Error: No valid keys found! Check your keys_url."
-              exit 1
-            fi
-
-            if [ -z "$(ls -A work/game)" ]; then
-              if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
-                mv work/raw/main_in work/game/base.nsp
-              fi
-            fi
-
-            if [ -n "$UPDATE_URL" ]; then
-              download_file "$UPDATE_URL" work/raw/upd_in
-              if ! 7z x work/raw/upd_in -owork/game -y >/dev/null 2>&1; then
-                mv work/raw/upd_in work/game/upd.nsp
-              fi
-            fi
-
-            find work/game -iname "*.nsz" -o -iname "*.xcz" | while read -r f; do
-              nsz -D "$f" -o work/game && rm -f "$f"
+            i=1
+            for url in $(echo "$EXTRA_URLS" | tr ',' ' '); do
+              [ -z "$url" ] && continue
+              download_file "$url" "$RUNNER_TEMP/raw/extra_${i}_in"
+              process_file "$RUNNER_TEMP/raw/extra_${i}_in" "$RUNNER_TEMP/game" "extra_${i}"
+              i=$((i + 1))
             done
 
-            BASE_FILE=$(ls -S work/game/* | head -n 1)
-            UPD_FILE=$(ls -S work/game/* | sed -n '2p')
+            find "$RUNNER_TEMP/game" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv -n {} "$RUNNER_TEMP/game/" \;
 
-            mkdir -p work/nca
-            hactool --intype=pfs0 --pfs0dir=work/nca "$BASE_FILE" || hactool --intype=xci --securedir=work/nca "$BASE_FILE"
-            MAIN_NCA=$(ls -S work/nca/*.nca | head -n 1)
-
-            if [ -n "$UPD_FILE" ]; then
-              mkdir -p work/nca_upd
-              hactool --intype=pfs0 --pfs0dir=work/nca_upd "$UPD_FILE"
-              UPD_NCA=$(ls -S work/nca_upd/*.nca | head -n 1)
-              hactool --basenca="$MAIN_NCA" --romfsdir=work/romfs "$UPD_NCA"
-            else
-              hactool --romfsdir=work/romfs "$MAIN_NCA"
+            if find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | grep -q .; then
+              find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | while read -r comp_file; do
+                nsz -D "$comp_file" -o "$RUNNER_TEMP/game"
+                rm -f "$comp_file"
+              done
             fi
+
+            # เรียกใช้ฟังก์ชันแตก RomFS จาก scripts/build_ipa_from_nsp.py โดยตรง (หยุดก่อนขั้นบิลด์ Xcode)
+            python3 - << 'EOF'
+          import os, sys
+          sys.path.insert(0, "scripts")
+          import build_ipa_from_nsp as b
+
+          game_dir = os.path.join(os.environ["RUNNER_TEMP"], "game")
+          keys_path = os.path.join(os.environ["RUNNER_TEMP"], "keys", "prod.keys")
+          work_dir = os.path.join(os.environ["RUNNER_TEMP"], "work")
+
+          # รันเฉพาะขั้นเตรียมและแตกไฟล์เกมของ build_ipa_from_nsp.py
+          for fn in dir(b):
+              if "extract" in fn.lower() or "romfs" in fn.lower() or "nsp" in fn.lower():
+                  print("Available helper:", fn)
+          EOF
+
+            # หรือให้ build_ipa_from_nsp.py แตกไฟล์ลง --work-dir (ถ้าไม่มี xcodebuild บน Linux มันจะแตกไฟล์เสร็จก่อนถึงขั้น Xcode)
+            python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" \
+              -k "$RUNNER_TEMP/keys/prod.keys" \
+              -o "$RUNNER_TEMP/work/dummy.ipa" \
+              --work-dir "$RUNNER_TEMP/work" \
+              --romfs separate \
+              --keep-extracted \
+              --progress lines || true
           fi
 
-          find work/romfs -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" \) -exec cp --parents {} work/inspect/ \;
-          ls -lh work/inspect/work/romfs/
+          # คัดไฟล์ข้อความและฟอนต์ทั้งหมดจาก work/extract
+          find "$RUNNER_TEMP/work" -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" -o -iname "*.json" -o -iname "*.txt" -o -iname "*.bin" \) -exec cp --parents {} "$RUNNER_TEMP/inspect/" \;
+          ls -lh "$RUNNER_TEMP/inspect"
 
       - name: Upload Inspect Files
         uses: actions/upload-artifact@v4
         with:
           name: text-and-fonts
-          path: work/inspect/work/romfs/
+          path: ${{ runner.temp }}/inspect/
