@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile, Direct link, or Google Drive link for base game (.nsp/.xci/.nsz) OR RomFS.img'
+        description: 'Gofile, Direct link, or Google Drive link for RomFS.img OR base game (.nsp/.xci/.nsz)'
         required: true
         type: string
       update_url:
@@ -74,23 +74,17 @@ jobs:
 
           download_file "$NSP_URL" work/raw/main_in
 
-          # เช็กว่าเป็นไฟล์ RomFS.img โดยใช้ --intype=romfs (ไม่ต้องใช้ prod.keys)
+          # เช็กว่าเป็นไฟล์ RomFS.img โดยตรงหรือไม่
           if hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in >/dev/null 2>&1; then
             echo "Extracted directly from RomFS.img!"
           else
             echo "Decrypting game package..."
-            if [ -z "$KEYS_URL" ]; then
-              echo "Error: keys_url is required for .nsp/.xci files!"
-              exit 1
-            fi
             download_file "$KEYS_URL" work/raw/keys_in
-            if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
-              FOUND_KEYS=$(find work/keys -type f -iname "*prod*.keys" | head -n 1)
-              [ -n "$FOUND_KEYS" ] && cp "$FOUND_KEYS" work/keys/prod.keys
-            else
-              cp work/raw/keys_in work/keys/prod.keys
-            fi
-            tr -d '\r' < work/keys/prod.keys > work/keys/prod_clean.keys
+            7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1 || cp work/raw/keys_in work/keys/raw.keys
+
+            # กรองเฉพาะบรรทัดที่รูปแบบถูกต้อง (key_name = hex_value) เพื่อกันไฟล์ขยะ/อักขระเพี้ยน
+            grep -E '^[a-zA-Z0-9_]+\s*=\s*[0-9a-fA-F]+' work/keys/* -h | tr -d '\r' > work/keys/prod_clean.keys
+            echo "Loaded $(wc -l < work/keys/prod_clean.keys) valid keys."
 
             if ! 7z x work/raw/main_in -owork/game -y >/dev/null 2>&1; then
               mv work/raw/main_in work/game/base.nsp
