@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile or Google Drive link for base game (.nsp/.nsz/.xci/.zip/.7z) OR RomFS.img'
+        description: 'Gofile or Google Drive link for base game (.nsp/.nsz/.xci/.zip/.7z)'
         required: true
         type: string
       keys_url:
-        description: 'Gofile or Google Drive link for prod.keys (leave blank if using RomFS.img)'
-        required: false
-        default: ''
+        description: 'Gofile or Google Drive link for prod.keys'
+        required: true
         type: string
       extra_urls:
         description: 'Optional: Gofile or Google Drive links for Update / DLC'
@@ -35,9 +34,8 @@ jobs:
 
       - name: Install tools & Python packages
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar xxd curl
-          python -m pip install lz4 "capstone>=5,<6" fonttools zbic gdown nsz playwright
-          playwright install chromium
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar xxd curl jq
+          python -m pip install lz4 "capstone>=5,<6" fonttools zbic gdown nsz requests
 
       - name: Download & Extract Game Text and Fonts
         env:
@@ -48,34 +46,46 @@ jobs:
           set -e
           mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/game" "$RUNNER_TEMP/keys" "$RUNNER_TEMP/keys_extract" "$RUNNER_TEMP/work" "$RUNNER_TEMP/inspect"
 
-          cat << 'EOF' > dl_gofile.py
-          import sys
-          from playwright.sync_api import sync_playwright
+          # โหลดไฟล์จาก Gofile ผ่าน API จริง (ได้ไฟล์ 6GB ตรงๆ ไม่ติดหน้าเว็บ HTML)
+          cat << 'EOF' > dl_gofile_api.py
+          import sys, requests
 
           url = sys.argv[1]
           out = sys.argv[2]
+          content_id = url.rstrip("/").split("/")[-1]
 
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
-              context = browser.new_context(accept_downloads=True)
-              page = context.new_page()
-              page.goto(url, wait_until="networkidle", timeout=60000)
-              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=30000)
-              with page.expect_download(timeout=0) as download_info:
-                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
-              download = download_info.value
-              download.save_as(out)
-              browser.close()
+          # 1. สร้าง Guest Account Token จาก Gofile API
+          acc = requests.post("https://api.gofile.io/accounts").json()
+          token = acc["data"]["token"]
+
+          # 2. ดึง Direct Link ของไฟล์ข้างในโฟลเดอร์
+          headers = {"Authorization": f"Bearer {token}", "X-Website-Token": "4fd6sg89d7s6"}
+          res = requests.get(f"https://api.gofile.io/contents/{content_id}", headers=headers).json()
+          if res.get("status") != "ok":
+              print("Gofile API Error:", res)
+              sys.exit(1)
+
+          children = res["data"]["children"]
+          first_file = next(iter(children.values()))
+          dlink = first_file["link"]
+          fname = first_file["name"]
+          fsize = first_file["size"]
+          print(f"Downloading {fname} ({fsize / (1024**3):.2f} GB) from Gofile API...")
+
+          with requests.get(dlink, headers={"Cookie": f"accountToken={token}"}, stream=True) as r:
+              r.raise_for_status()
+              with open(out, "wb") as f:
+                  for chunk in r.iter_content(chunk_size=1024*1024*8):
+                      if chunk:
+                          f.write(chunk)
           EOF
 
           download_file() {
             local url="$1"
             local out="$2"
             if echo "$url" | grep -qiE "gofile\.io/d/"; then
-              echo "Downloading from Gofile..."
-              python3 dl_gofile.py "$url" "$out"
+              python3 dl_gofile_api.py "$url" "$out"
             elif echo "$url" | grep -qiE "drive\.google\.com|docs\.google\.com"; then
-              echo "Downloading from Google Drive..."
               gdown "$url" -O "$out"
             else
               curl -fL --retry 3 -o "$out" "$url"
@@ -112,111 +122,45 @@ jobs:
             fi
           }
 
+          download_file "$KEYS_URL" "$RUNNER_TEMP/raw/keys_in"
+          process_file "$RUNNER_TEMP/raw/keys_in" "$RUNNER_TEMP/keys_extract" "keys"
+          FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*prod*.keys" | head -n 1)
+          [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*.keys" | head -n 1)
+          [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f | head -n 1)
+          cp "$FOUND_KEYS" "$RUNNER_TEMP/keys/prod.keys"
+          mkdir -p "$HOME/.switch"
+          cp "$RUNNER_TEMP/keys/prod.keys" "$HOME/.switch/prod.keys"
+
           download_file "$NSP_URL" "$RUNNER_TEMP/raw/base_in"
+          process_file "$RUNNER_TEMP/raw/base_in" "$RUNNER_TEMP/game" "base"
 
-          # เช็กว่าไฟล์ที่โหลดมาเป็น RomFS.img จาก NX2Apple หรือไม่ (เช็ก magic header ของสคริปต์ใน repo)
-          python3 - << 'EOF'
-          import os, sys, struct
+          i=1
+          for url in $(echo "$EXTRA_URLS" | tr ',' ' '); do
+            [ -z "$url" ] && continue
+            download_file "$url" "$RUNNER_TEMP/raw/extra_${i}_in"
+            process_file "$RUNNER_TEMP/raw/extra_${i}_in" "$RUNNER_TEMP/game" "extra_${i}"
+            i=$((i + 1))
+          done
 
-          src = os.path.join(os.environ["RUNNER_TEMP"], "raw", "base_in")
-          out_dir = os.path.join(os.environ["RUNNER_TEMP"], "work", "extracted")
+          find "$RUNNER_TEMP/game" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv -n {} "$RUNNER_TEMP/game/" \;
 
-          with open("scripts/build_ipa_from_nsp.py", "r", encoding="utf-8", errors="ignore") as f:
-              code = f.read()
-
-          with open(src, "rb") as f:
-              head = f.read(64)
-
-          # ถ้าไฟล์เป็น NX2Apple RomFS.img (มักขึ้นต้นด้วย NXRF / ROMF / หรือ magic ที่อยู่ใน build_ipa_from_nsp.py)
-          if head[:4] in (b"NXRF", b"ROMF", b"NX2A", b"IVFC"):
-              print(f"Detected RomFS.img with magic {head[:4]}! Inspecting parser from build_ipa_from_nsp.py...")
-          EOF
-
-          if [ -z "$KEYS_URL" ]; then
-            echo "No keys_url provided. Attempting to unpack RomFS.img directly via repo scripts..."
-            python3 - << 'EOF'
-          import os, re, struct
-
-          src = os.path.join(os.environ["RUNNER_TEMP"], "raw", "base_in")
-          out_dir = os.path.join(os.environ["RUNNER_TEMP"], "work", "extracted")
-          os.makedirs(out_dir, exist_ok=True)
-
-          # ตรวจดูรูปแบบโครงสร้างไฟล์จาก scripts/build_ipa_from_nsp.py และแตกไฟล์ย่อยทั้งหมด
-          with open("scripts/build_ipa_from_nsp.py", "r", encoding="utf-8", errors="ignore") as f:
-              script_txt = f.read()
-
-          for line in script_txt.splitlines():
-              if any(k in line for k in ("RomFS.img", "magic", "struct.pack", "struct.unpack")):
-                  print("REF:", line.strip())
-
-          with open(src, "rb") as f:
-              magic = f.read(8)
-              print("FILE HEAD:", magic)
-              # แตกไฟล์ตามโครงสร้างของ NX2Apple RomFS.img (Header + Table + Data)
-              f.seek(0)
-              raw_hdr = f.read(32)
-              vals = struct.unpack("<4sIIIQII", raw_hdr) if len(raw_hdr) == 32 else None
-              print("HEADER UNPACK:", vals)
-          EOF
-          fi
-
-          # โหมดมาตรฐานของ Repo (ใช้ zbic + build_ipa_from_nsp.py แตก NSP + Update + prod.keys)
-          if [ -n "$KEYS_URL" ]; then
-            download_file "$KEYS_URL" "$RUNNER_TEMP/raw/keys_in"
-            process_file "$RUNNER_TEMP/raw/keys_in" "$RUNNER_TEMP/keys_extract" "keys"
-            FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*prod*.keys" | head -n 1)
-            [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f -iname "*.keys" | head -n 1)
-            [ -z "$FOUND_KEYS" ] && FOUND_KEYS=$(find "$RUNNER_TEMP/keys_extract" -type f | head -n 1)
-            cp "$FOUND_KEYS" "$RUNNER_TEMP/keys/prod.keys"
-            mkdir -p "$HOME/.switch"
-            cp "$RUNNER_TEMP/keys/prod.keys" "$HOME/.switch/prod.keys"
-
-            process_file "$RUNNER_TEMP/raw/base_in" "$RUNNER_TEMP/game" "base"
-
-            i=1
-            for url in $(echo "$EXTRA_URLS" | tr ',' ' '); do
-              [ -z "$url" ] && continue
-              download_file "$url" "$RUNNER_TEMP/raw/extra_${i}_in"
-              process_file "$RUNNER_TEMP/raw/extra_${i}_in" "$RUNNER_TEMP/game" "extra_${i}"
-              i=$((i + 1))
+          if find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | grep -q .; then
+            find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | while read -r comp_file; do
+              nsz -D "$comp_file" -o "$RUNNER_TEMP/game"
+              rm -f "$comp_file"
             done
-
-            find "$RUNNER_TEMP/game" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" \) -exec mv -n {} "$RUNNER_TEMP/game/" \;
-
-            if find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | grep -q .; then
-              find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | while read -r comp_file; do
-                nsz -D "$comp_file" -o "$RUNNER_TEMP/game"
-                rm -f "$comp_file"
-              done
-            fi
-
-            # เรียกใช้ฟังก์ชันแตก RomFS จาก scripts/build_ipa_from_nsp.py โดยตรง (หยุดก่อนขั้นบิลด์ Xcode)
-            python3 - << 'EOF'
-          import os, sys
-          sys.path.insert(0, "scripts")
-          import build_ipa_from_nsp as b
-
-          game_dir = os.path.join(os.environ["RUNNER_TEMP"], "game")
-          keys_path = os.path.join(os.environ["RUNNER_TEMP"], "keys", "prod.keys")
-          work_dir = os.path.join(os.environ["RUNNER_TEMP"], "work")
-
-          # รันเฉพาะขั้นเตรียมและแตกไฟล์เกมของ build_ipa_from_nsp.py
-          for fn in dir(b):
-              if "extract" in fn.lower() or "romfs" in fn.lower() or "nsp" in fn.lower():
-                  print("Available helper:", fn)
-          EOF
-
-            # หรือให้ build_ipa_from_nsp.py แตกไฟล์ลง --work-dir (ถ้าไม่มี xcodebuild บน Linux มันจะแตกไฟล์เสร็จก่อนถึงขั้น Xcode)
-            python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" \
-              -k "$RUNNER_TEMP/keys/prod.keys" \
-              -o "$RUNNER_TEMP/work/dummy.ipa" \
-              --work-dir "$RUNNER_TEMP/work" \
-              --romfs separate \
-              --keep-extracted \
-              --progress lines || true
           fi
 
-          # คัดไฟล์ข้อความและฟอนต์ทั้งหมดจาก work/extract
+          ls -lh "$RUNNER_TEMP/game" "$RUNNER_TEMP/keys/prod.keys"
+
+          python3 scripts/build_ipa_from_nsp.py "$RUNNER_TEMP/game" \
+            -k "$RUNNER_TEMP/keys/prod.keys" \
+            -o "$RUNNER_TEMP/work/dummy.ipa" \
+            --work-dir "$RUNNER_TEMP/work" \
+            --romfs separate \
+            --keep-extracted \
+            --progress lines || true
+
           find "$RUNNER_TEMP/work" -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" -o -iname "*.json" -o -iname "*.txt" -o -iname "*.bin" \) -exec cp --parents {} "$RUNNER_TEMP/inspect/" \;
           ls -lh "$RUNNER_TEMP/inspect"
 
