@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       nsp_url:
-        description: 'Gofile, Direct link, or Google Drive link for RomFS.img OR base game (.nsp/.xci/.nsz)'
+        description: 'Gofile, Direct link, or Google Drive link for base game (.nsp/.xci/.nsz) OR RomFS.img'
         required: true
         type: string
       update_url:
@@ -63,7 +63,7 @@ jobs:
             local url="$1"
             local out="$2"
             if [[ "$url" == *"drive.google.com"* ]]; then
-              gdown --fuzzy "$url" -O "$out"
+              gdown "$url" -O "$out"
             elif [[ "$url" == *"gofile.io/d/"* ]]; then
               echo "Downloading from Gofile via headless browser..."
               python3 dl_gofile.py "$url" "$out"
@@ -75,10 +75,14 @@ jobs:
           download_file "$NSP_URL" work/raw/main_in
 
           # เช็กว่าเป็นไฟล์ RomFS.img โดยใช้ --intype=romfs (ไม่ต้องใช้ prod.keys)
-          if hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in; then
+          if hactool --intype=romfs --romfsdir=work/romfs work/raw/main_in >/dev/null 2>&1; then
             echo "Extracted directly from RomFS.img!"
           else
-            echo "Not a raw RomFS.img, decrypting game package..."
+            echo "Decrypting game package..."
+            if [ -z "$KEYS_URL" ]; then
+              echo "Error: keys_url is required for .nsp/.xci files!"
+              exit 1
+            fi
             download_file "$KEYS_URL" work/raw/keys_in
             if 7z x work/raw/keys_in -owork/keys -y >/dev/null 2>&1; then
               FOUND_KEYS=$(find work/keys -type f -iname "*prod*.keys" | head -n 1)
