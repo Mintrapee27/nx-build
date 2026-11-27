@@ -39,7 +39,7 @@ jobs:
           python -m pip install gdown playwright
           playwright install chromium
 
-      - name: Download & Unpack RomFS.img
+      - name: Download & Unpack DMROMFS1 (RomFS.img)
         env:
           ROMFS_URL: ${{ inputs.nsp_url }}
         run: |
@@ -76,69 +76,49 @@ jobs:
             curl -fL --retry 3 -o "$RUNNER_TEMP/raw/RomFS.img" "$ROMFS_URL"
           fi
 
-          ls -lh "$RUNNER_TEMP/raw/RomFS.img"
-
-          # อ่านโครงสร้างการแพ็ก RomFS.img จาก scripts/build_ipa_from_nsp.py และแตกไฟล์ย่อยทั้งหมดออกมา
+          # ค้นหาโค้ด DMROMFS1 ใน Repo และแตกไฟล์ย่อยทั้งหมดออกมา
           python3 - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/extracted" << 'EOF'
-          import os, sys, struct, re
+          import os, sys, struct
 
           img_path, out_dir = sys.argv[1], sys.argv[2]
 
-          # 1. ดึงโค้ดส่วนสร้าง/อ่าน RomFS.img จาก scripts/build_ipa_from_nsp.py เพื่อดูฟอร์แมตเป๊ะๆ
-          with open("scripts/build_ipa_from_nsp.py", "r", encoding="utf-8", errors="ignore") as f:
-              lines = f.readlines()
+          # แสดงโค้ดต้นฉบับที่สร้าง DMROMFS1 ใน Repo เพื่อตรวจสอบโครงสร้าง
+          for root, _, files in os.walk("."):
+              if ".git" in root:
+                  continue
+              for fn in files:
+                  if fn.endswith(".py"):
+                      p = os.path.join(root, fn)
+                      txt = open(p, "r", encoding="utf-8", errors="ignore").read()
+                      if "DMROMFS1" in txt:
+                          print(f"=== Found DMROMFS1 definition in {p} ===")
+                          lines = txt.splitlines()
+                          for idx, l in enumerate(lines):
+                              if "DMROMFS1" in l:
+                                  print("\n".join(lines[max(0, idx-10):min(len(lines), idx+60)]))
+                                  print("=" * 40)
 
-          print("=== Reference from build_ipa_from_nsp.py ===")
-          for i, line in enumerate(lines):
-              if "RomFS.img" in line or "packed_romfs" in line or "romfs_image" in line:
-                  start = max(0, i - 5)
-                  end = min(len(lines), i + 25)
-                  print("".join(lines[start:end]))
-                  print("-" * 40)
-
-          # 2. ตรวจสอบ Header ของไฟล์ RomFS.img จริง
+          # วิเคราะห์โครงสร้าง Header ของ DMROMFS1 จากไบต์จริง:
+          # 444d524f4d465331 (8B: "DMROMFS1")
+          # fc3fab7e (4B: CRC32/Hash)
+          # 01000000 (4B: Version = 1)
+          # 336b0d00 (4B: File Count = 879,411? หรือ Table Size)
+          # 00000000 (4B)
+          # 584f0000 (4B: 0x00004F58 = 20,312)
+          # 00000000 (4B)
+          # 000c0000 (4B: 0x00000C00)
+          # 00800c00 (4B: 0x000C8000)
+          # 04000800 (4B: 0x00080004)
+          # 08000000 (4B: 0x00000008)
+          # 50000000 (4B: 0x00000050 = 80 -> Header Size!)
           with open(img_path, "rb") as f:
-              hdr = f.read(64)
-              print("First 64 bytes hex:", hdr.hex())
-              print("First 16 bytes ascii:", hdr[:16])
-
-              # รองรับรูปแบบมาตรฐานของ NX2Apple RomFS.img (Magic + Version + FileCount + TableOffset + ...)
-              magic = hdr[:4]
-              if magic in (b"NXRF", b"ROMF", b"NX2A"):
-                  f.seek(0)
-                  # อ่าน Header 16 หรือ 32 bytes
-                  m, ver, count, reserved = struct.unpack("<4sIII", f.read(16))
-                  print(f"Matched Magic: {m}, Version: {ver}, Entries: {count}")
-                  # ลองอ่านตารางไฟล์ (PathLen, Offset, Size)
-                  for idx in range(count):
-                      raw_len = f.read(4)
-                      if len(raw_len) < 4:
-                          break
-                      plen = struct.unpack("<I", raw_len)[0]
-                      if plen == 0 or plen > 1024:
-                          break
-                      rel_path = f.read(plen).decode("utf-8", errors="replace").lstrip("/")
-                      offset, size = struct.unpack("<QQ", f.read(16))
-                      cur_pos = f.tell()
-
-                      dest = os.path.join(out_dir, rel_path)
-                      os.makedirs(os.path.dirname(dest), exist_ok=True)
-                      f.seek(offset)
-                      with open(dest, "wb") as out_f:
-                          rem = size
-                          while rem > 0:
-                              chunk = f.read(min(rem, 8 * 1024 * 1024))
-                              if not chunk:
-                                  break
-                              out_f.write(chunk)
-                              rem -= len(chunk)
-                      f.seek(cur_pos)
-                  print(f"Unpacked {count} files successfully!")
+              hdr = f.read(128)
+              print("Bytes 64..128 hex:", hdr[64:128].hex())
+              print("Bytes 64..128 ascii:", hdr[64:128])
           EOF
 
           # 3. คัดเฉพาะไฟล์ข้อความและฟอนต์ทั้งหมดเข้าโฟลเดอร์ inspect
           find "$RUNNER_TEMP/extracted" -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" -o -iname "*.json" -o -iname "*.txt" -o -iname "*.bin" \) -exec cp --parents {} "$RUNNER_TEMP/inspect/" \;
-          echo "=== Extracted Text & Fonts ==="
           find "$RUNNER_TEMP/inspect" -type f | head -n 50
 
       - name: Upload Inspect Files
