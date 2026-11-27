@@ -35,16 +35,16 @@ jobs:
 
       - name: Install tools & Python packages
         run: |
-          sudo apt-get update && sudo apt-get install -y p7zip-full unar xxd curl file
+          sudo apt-get update && sudo apt-get install -y p7zip-full unar xxd curl
           python -m pip install gdown playwright
           playwright install chromium
 
-      - name: Download & Unpack DMROMFS1 (RomFS.img)
+      - name: Download & Extract Text and Fonts from DMROMFS1
         env:
           ROMFS_URL: ${{ inputs.nsp_url }}
         run: |
           set -e
-          mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/extracted" "$RUNNER_TEMP/inspect"
+          mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/inspect"
 
           cat << 'EOF' > "$RUNNER_TEMP/dl_gofile.py"
           import sys, time
@@ -76,50 +76,55 @@ jobs:
             curl -fL --retry 3 -o "$RUNNER_TEMP/raw/RomFS.img" "$ROMFS_URL"
           fi
 
-          # ค้นหาโค้ด DMROMFS1 ใน Repo และแตกไฟล์ย่อยทั้งหมดออกมา
-          python3 - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/extracted" << 'EOF'
-          import os, sys, struct
+          # ใช้คลาส romfs.Image ของโปรเจกต์โดยตรง อ่านและคัดเฉพาะไฟล์ข้อความกับฟอนต์ออกมา
+          python3 - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/inspect" << 'EOF'
+          import os, sys
+          sys.path.insert(0, os.path.abspath("dm/tools"))
+          import romfs
 
           img_path, out_dir = sys.argv[1], sys.argv[2]
+          img = romfs.Image(img_path)
+          print(f"Loaded DMROMFS1 successfully: {img.count} total entries")
 
-          # แสดงโค้ดต้นฉบับที่สร้าง DMROMFS1 ใน Repo เพื่อตรวจสอบโครงสร้าง
-          for root, _, files in os.walk("."):
-              if ".git" in root:
-                  continue
-              for fn in files:
-                  if fn.endswith(".py"):
-                      p = os.path.join(root, fn)
-                      txt = open(p, "r", encoding="utf-8", errors="ignore").read()
-                      if "DMROMFS1" in txt:
-                          print(f"=== Found DMROMFS1 definition in {p} ===")
-                          lines = txt.splitlines()
-                          for idx, l in enumerate(lines):
-                              if "DMROMFS1" in l:
-                                  print("\n".join(lines[max(0, idx-10):min(len(lines), idx+60)]))
-                                  print("=" * 40)
+          target_exts = (".dat", ".tbl", ".msbt", ".bfotf", ".bfttf", ".ttf", ".otf", ".json", ".txt", ".bin", ".arc", ".trpak", ".trpfs", ".trpfd")
+          extracted_count = 0
 
-          # วิเคราะห์โครงสร้าง Header ของ DMROMFS1 จากไบต์จริง:
-          # 444d524f4d465331 (8B: "DMROMFS1")
-          # fc3fab7e (4B: CRC32/Hash)
-          # 01000000 (4B: Version = 1)
-          # 336b0d00 (4B: File Count = 879,411? หรือ Table Size)
-          # 00000000 (4B)
-          # 584f0000 (4B: 0x00004F58 = 20,312)
-          # 00000000 (4B)
-          # 000c0000 (4B: 0x00000C00)
-          # 00800c00 (4B: 0x000C8000)
-          # 04000800 (4B: 0x00080004)
-          # 08000000 (4B: 0x00000008)
-          # 50000000 (4B: 0x00000050 = 80 -> Header Size!)
-          with open(img_path, "rb") as f:
-              hdr = f.read(128)
-              print("Bytes 64..128 hex:", hdr[64:128].hex())
-              print("Bytes 64..128 ascii:", hdr[64:128])
+          with open(img_path, "rb") as raw_f:
+              stack = [(0, "")]
+              while stack:
+                  k, rel_path = stack.pop()
+                  a, b, _, _, t, _ = img.entry(k)
+                  if t == 1:
+                      lower_path = rel_path.lower()
+                      if (
+                          "message" in lower_path
+                          or "text" in lower_path
+                          or "font" in lower_path
+                          or "lang" in lower_path
+                          or lower_path.endswith(target_exts)
+                      ):
+                          dest = os.path.join(out_dir, rel_path)
+                          os.makedirs(os.path.dirname(dest), exist_ok=True)
+                          raw_f.seek(a)
+                          with open(dest, "wb") as out_f:
+                              rem = b
+                              while rem > 0:
+                                  chunk = raw_f.read(min(rem, 8 * 1024 * 1024))
+                                  if not chunk:
+                                      break
+                                  out_f.write(chunk)
+                                  rem -= len(chunk)
+                          extracted_count += 1
+                  else:
+                      for child_name, child_idx in img.children(k):
+                          child_rel = f"{rel_path}/{child_name}" if rel_path else child_name
+                          stack.append((child_idx, child_rel))
+
+          print(f"Extracted {extracted_count} text/font/archive files into inspect folder.")
           EOF
 
-          # 3. คัดเฉพาะไฟล์ข้อความและฟอนต์ทั้งหมดเข้าโฟลเดอร์ inspect
-          find "$RUNNER_TEMP/extracted" -type f \( -iname "*message*" -o -iname "*.dat" -o -iname "*.tbl" -o -iname "*.msbt" -o -iname "*.bfotf" -o -iname "*.bfttf" -o -iname "*.ttf" -o -iname "*.otf" -o -iname "*.json" -o -iname "*.txt" -o -iname "*.bin" \) -exec cp --parents {} "$RUNNER_TEMP/inspect/" \;
-          find "$RUNNER_TEMP/inspect" -type f | head -n 50
+          echo "=== Folder Structure ==="
+          find "$RUNNER_TEMP/inspect" -maxdepth 4
 
       - name: Upload Inspect Files
         uses: actions/upload-artifact@v4
