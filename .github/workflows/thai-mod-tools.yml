@@ -1,0 +1,87 @@
+name: Thai Mod Tools (Scan Paths)
+
+on:
+  workflow_dispatch:
+    inputs:
+      romfs_url:
+        description: 'Gofile or Google Drive link for original RomFS.img (6.0GB)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        run: |
+          python -m pip install gdown playwright
+          playwright install chromium
+
+      - name: Scan RomFS Paths
+        env:
+          ROMFS_URL: ${{ inputs.romfs_url }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/raw"
+
+          python3 -u - "$ROMFS_URL" "$RUNNER_TEMP/raw/RomFS.img" << 'EOF'
+          import sys, time
+          from playwright.sync_api import sync_playwright
+          url, out = sys.argv[1], sys.argv[2]
+          with sync_playwright() as p:
+              b = p.chromium.launch(headless=True)
+              page = b.new_context(accept_downloads=True).new_page()
+              page.goto(url, wait_until="networkidle", timeout=90000)
+              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=45000)
+              time.sleep(2)
+              with page.expect_download(timeout=0) as d:
+                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
+              d.value.save_as(out)
+              b.close()
+          EOF
+
+          python3 -u - "$RUNNER_TEMP/raw/RomFS.img" << 'EOF'
+          import os, sys
+          sys.path.insert(0, os.path.abspath("dm/tools"))
+          import romfs
+
+          img = romfs.Image(sys.argv[1])
+          msg_dirs = set()
+          font_files = []
+          with open(sys.argv[1], "rb") as raw_f:
+              stack = [(0, "")]
+              while stack:
+                  k, rel = stack.pop()
+                  a, b, _, _, t, _ = img.entry(k)
+                  if t == 1:
+                      low = rel.lower()
+                      if low.endswith(".dat") and "message" in low:
+                          msg_dirs.add(os.path.dirname(rel))
+                      if any(x in low for x in ("font", ".bfotf", ".bfttf", ".otf", ".ttf")):
+                          raw_f.seek(a)
+                          head = raw_f.read(32).hex()
+                          font_files.append((rel, b, head))
+                  else:
+                      for name, idx in img.children(k):
+                          stack.append((idx, f"{rel}/{name}" if rel else name))
+
+          print("=== MESSAGE FOLDERS ===", flush=True)
+          for d in sorted(msg_dirs):
+              print("MSG_DIR:", d, flush=True)
+
+          print("=== FONT FILES ===", flush=True)
+          for f, sz, h in sorted(font_files):
+              print(f"FONT: {f} | size={sz} | head={h}", flush=True)
+          EOF
