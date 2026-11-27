@@ -53,48 +53,44 @@ jobs:
           set -e
           mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/out" "$RUNNER_TEMP/mod_in" "$RUNNER_TEMP/romfs_tree"
 
-          cat << 'EOF' > "$RUNNER_TEMP/dl_gofile.py"
-          import sys, time
-          from playwright.sync_api import sync_playwright
-
-          url = sys.argv[1]
-          out = sys.argv[2]
-
-          with sync_playwright() as p:
-              browser = p.chromium.launch(headless=True)
-              context = browser.new_context(accept_downloads=True)
-              page = context.new_page()
-              page.goto(url, wait_until="networkidle", timeout=90000)
-              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=45000)
-              time.sleep(2)
-              with page.expect_download(timeout=0) as download_info:
-                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
-              download = download_info.value
-              print(f"Downloading {download.suggested_filename}...", flush=True)
-              download.save_as(out)
-              browser.close()
-          EOF
-
-          download_file() {
-            local url="$1"
-            local out="$2"
-            if echo "$url" | grep -qiE "gofile\.io/d/"; then
-              python3 -u "$RUNNER_TEMP/dl_gofile.py" "$url" "$out"
-            elif echo "$url" | grep -qiE "drive\.google\.com|docs\.google\.com"; then
-              gdown "$url" -O "$out"
-            else
-              curl -fL --retry 3 -o "$out" "$url"
-            fi
-          }
-
-          download_file "$ROMFS_URL" "$RUNNER_TEMP/raw/RomFS.img"
-          echo "Download finished. Starting processing..."
-
-          cat << 'EOF' > "$RUNNER_TEMP/gf_tools.py"
-          import os, sys, json, re, time, struct
+          python3 -u -c '
+          import os, sys, json, re, time, struct, subprocess, shutil
           from concurrent.futures import ThreadPoolExecutor
           from fontTools.ttLib import TTFont
           from fontTools.merge import Merger
+
+          sys.path.insert(0, os.path.abspath("dm/tools"))
+          import romfs
+
+          temp_dir = os.environ["RUNNER_TEMP"]
+          mode = os.environ["MODE"]
+          romfs_url = os.environ["ROMFS_URL"]
+          mod_zip_url = os.environ.get("MOD_ZIP_URL", "").strip()
+
+          def download_file(url, out_path):
+              if "gofile.io/d/" in url.lower():
+                  from playwright.sync_api import sync_playwright
+                  with sync_playwright() as p:
+                      browser = p.chromium.launch(headless=True)
+                      context = browser.new_context(accept_downloads=True)
+                      page = context.new_page()
+                      page.goto(url, wait_until="networkidle", timeout=90000)
+                      page.wait_for_selector("button:has-text(\"Download\"), a:has-text(\"Download\")", timeout=45000)
+                      time.sleep(2)
+                      with page.expect_download(timeout=0) as dl_info:
+                          page.locator("button:has-text(\"Download\"), a:has-text(\"Download\")").first.click()
+                      dl = dl_info.value
+                      print(f"Downloading {dl.suggested_filename}...", flush=True)
+                      dl.save_as(out_path)
+                      browser.close()
+              elif "drive.google.com" in url.lower() or "docs.google.com" in url.lower():
+                  subprocess.run(["gdown", url, "-O", out_path], check=True)
+              else:
+                  subprocess.run(["curl", "-fL", "--retry", "3", "-o", out_path, url], check=True)
+
+          raw_romfs = os.path.join(temp_dir, "raw", "RomFS.img")
+          download_file(romfs_url, raw_romfs)
+          print("Download finished. Starting processing...", flush=True)
 
           def crypt_gf_text(data_bytes, entry_idx):
               key = (0x7C89 + entry_idx * 0x2983) & 0xFFFF
@@ -129,9 +125,9 @@ jobs:
                           params = []
                           for _ in range(max(0, tag_len - 1)):
                               if idx + 1 < len(dec):
-                                  params.append(f"{struct.unpack_from('<H', dec, idx)[0]:04X}")
+                                  params.append(f"{struct.unpack_from(\"<H\", dec, idx)[0]:04X}")
                                   idx += 2
-                          chars.append(f"[TAG:{tag_type:04X}:{','.join(params)}]")
+                          chars.append(f"[TAG:{tag_type:04X}:{chr(44).join(params)}]")
                       elif u == 0x000A:
                           chars.append("\n")
                       else:
@@ -183,11 +179,10 @@ jobs:
           def decode_bfotf(bfotf_bytes):
               if bfotf_bytes[:4] in (b"OTTO", b"\x00\x01\x00\x00"):
                   return bfotf_bytes, None, b"", 0
-              if len(bfotf_bytes) < 64:
+              if len(bfotf_bytes) < 96:
                   return None, None, b"", 0
 
               fsize = len(bfotf_bytes)
-              # Try both full file size and payload size (minus 16/32/48/64 header) in LE & BE
               for hdr_sub in (0, 16, 32, 48, 64):
                   val = fsize - hdr_sub
                   if val <= 0:
@@ -206,7 +201,6 @@ jobs:
                               dec_full = bytes([bfotf_bytes[i] ^ key[i % 16] for i in range(fsize)])
                               return dec_full[off:], bytes(key), dec_full[:off], hdr_sub
 
-              # Fallback debug decode with full size LE
               sz_le = fsize.to_bytes(4, "little")
               key = bytearray(bfotf_bytes[:16])
               for i in range(4):
@@ -286,4 +280,96 @@ jobs:
               cur_batch, cur_len = [], 0
               for item in todo:
                   item_len = len(item[1]) + 12
-                  if cur_batch and cur_len + item_len > 350
+                  if cur_batch and cur_len + item_len > 3500:
+                      batches.append(cur_batch)
+                      cur_batch, cur_len = [], 0
+                  cur_batch.append(item)
+                  cur_len += item_len
+              if cur_batch:
+                  batches.append(cur_batch)
+
+              def run_batch(batch):
+                  joined = "\n|||SEP|||\n".join(x[1] for x in batch)
+                  for attempt in range(2):
+                      try:
+                          tr = GoogleTranslator(source="en", target="th").translate(joined)
+                          if tr:
+                              parts = re.split(r"\s*\|\|\|\s*SEP\s*\|\|\|\s*", tr)
+                              if len(parts) == len(batch):
+                                  out = []
+                                  for (orig_idx, _, tags), p in zip(batch, parts):
+                                      p = re.sub(r"\s*__NL__\s*", "\n", p, flags=re.IGNORECASE)
+                                      for t_i, orig_tag in enumerate(tags):
+                                          p = re.sub(rf"\s*__T{t_i}__\s*", orig_tag, p, flags=re.IGNORECASE)
+                                      out.append((orig_idx, p.strip()))
+                                  return out
+                      except Exception:
+                          time.sleep(0.5)
+                  return []
+
+              with ThreadPoolExecutor(max_workers=6) as ex:
+                  for batch_res in ex.map(run_batch, batches):
+                      for orig_idx, th_text in batch_res:
+                          if th_text:
+                              results[orig_idx] = th_text
+              return results
+
+          thai_ttf = "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf"
+          out_dir = os.path.join(temp_dir, "out")
+          img = romfs.Image(raw_romfs)
+
+          if mode == "export":
+              os.makedirs(os.path.join(out_dir, "json_text"), exist_ok=True)
+              os.makedirs(os.path.join(out_dir, "thai_fonts"), exist_ok=True)
+              with open(raw_romfs, "rb") as raw_f:
+                  stack = [(0, "")]
+                  dat_ok, font_ok = 0, 0
+                  while stack:
+                      k, rel_path = stack.pop()
+                      a, b, _, _, t, _ = img.entry(k)
+                      if t == 1:
+                          low = rel_path.lower()
+                          if low.endswith(".dat") and "bin/message/english/" in low:
+                              raw_f.seek(a)
+                              parsed = parse_gf_dat(raw_f.read(b))
+                              if parsed is not None:
+                                  jpath = os.path.join(out_dir, "json_text", rel_path + ".json")
+                                  os.makedirs(os.path.dirname(jpath), exist_ok=True)
+                                  with open(jpath, "w", encoding="utf-8") as jf:
+                                      json.dump([{"id": i, "en": txt, "th": ""} for i, txt in enumerate(parsed)], jf, ensure_ascii=False, indent=2)
+                                  dat_ok += 1
+                          elif low.endswith(".bfotf") and "bin/font/" in low and "or_font" not in low:
+                              raw_f.seek(a)
+                              patched = patch_bfotf_with_thai(raw_f.read(b), thai_ttf)
+                              if patched:
+                                  fpath = os.path.join(out_dir, "thai_fonts", rel_path)
+                                  os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                                  with open(fpath, "wb") as ff:
+                                      ff.write(patched)
+                                  font_ok += 1
+                      else:
+                          for child_name, child_idx in img.children(k):
+                              stack.append((child_idx, f"{rel_path}/{child_name}" if rel_path else child_name))
+              print(f"Exported {dat_ok} JSON text files and patched {font_ok} Thai BFOTF fonts!", flush=True)
+
+          elif mode in ("build", "translate_all"):
+              mod_dir = os.path.join(temp_dir, "mod_in")
+              tree_dir = os.path.join(temp_dir, "romfs_tree")
+              if mod_zip_url:
+                  mod_zip = os.path.join(temp_dir, "raw", "mod_in.zip")
+                  download_file(mod_zip_url, mod_zip)
+                  subprocess.run(["7z", "x", mod_zip, f"-o{mod_dir}", "-y"], check=True)
+
+              translated_by_path = {}
+              translated_by_name = {}
+              for r, _, fs in os.walk(mod_dir):
+                  if "__MACOSX" in r:
+                      continue
+                  for fn in fs:
+                      if fn.startswith("._"):
+                          continue
+                      if fn.endswith(".dat.json") or fn.endswith(".json"):
+                          full_p = os.path.join(r, fn)
+                          norm = full_p.replace("\\", "/")
+                          base_dat = fn[:-5] if fn.endswith(".dat.json") else (fn[:-5] + ".dat")
+                          translated_by_name[base_dat
