@@ -1,0 +1,303 @@
+name: Thai Mod Tools (Export Text & Build RomFS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Select mode: export (get JSON + Thai BFOTF) or build (pack Thai RomFS.img)'
+        required: true
+        default: 'export'
+        type: choice
+        options:
+          - export
+          - build
+      romfs_url:
+        description: 'Gofile or Google Drive link for original RomFS.img (6.0GB)'
+        required: true
+        type: string
+      mod_zip_url:
+        description: 'Only for [build] mode: Gofile/Drive link to translated zip'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tools & Python libraries
+        run: |
+          sudo apt-get update && sudo apt-get install -y p7zip-full curl fonts-noto-core
+          python -m pip install gdown playwright fonttools
+          playwright install chromium
+
+      - name: Run Thai Mod Pipeline
+        env:
+          MODE: ${{ inputs.mode }}
+          ROMFS_URL: ${{ inputs.romfs_url }}
+          MOD_ZIP_URL: ${{ inputs.mod_zip_url }}
+        run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/out" "$RUNNER_TEMP/work"
+
+          cat << 'EOF' > "$RUNNER_TEMP/dl_gofile.py"
+          import sys, time
+          from playwright.sync_api import sync_playwright
+
+          url = sys.argv[1]
+          out = sys.argv[2]
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              context = browser.new_context(accept_downloads=True)
+              page = context.new_page()
+              page.goto(url, wait_until="networkidle", timeout=90000)
+              page.wait_for_selector("button:has-text('Download'), a:has-text('Download')", timeout=45000)
+              time.sleep(2)
+              with page.expect_download(timeout=0) as download_info:
+                  page.locator("button:has-text('Download'), a:has-text('Download')").first.click()
+              download = download_info.value
+              print(f"Downloading {download.suggested_filename}...")
+              download.save_as(out)
+              browser.close()
+          EOF
+
+          download_file() {
+            local url="$1"
+            local out="$2"
+            if echo "$url" | grep -qiE "gofile\.io/d/"; then
+              python3 "$RUNNER_TEMP/dl_gofile.py" "$url" "$out"
+            elif echo "$url" | grep -qiE "drive\.google\.com|docs\.google\.com"; then
+              gdown "$url" -O "$out"
+            else
+              curl -fL --retry 3 -o "$out" "$url"
+            fi
+          }
+
+          # โหลด RomFS.img ต้นฉบับ
+          download_file "$ROMFS_URL" "$RUNNER_TEMP/raw/RomFS.img"
+
+          # เขียนโมดูล Python สำหรับแกะ/แพ็ก Game Freak .dat/.tbl และรวมฟอนต์ไทยใน .BFOTF
+          cat << 'EOF' > "$RUNNER_TEMP/gf_tools.py"
+          import os, sys, json, struct
+          from fontTools.ttLib import TTFont
+          from fontTools.merge import Merger
+
+          # --- 1. ตัวถอดรหัส/เข้ารหัส Game Freak Message (.dat) ---
+          # อัลกอริทึมมาตรฐานของ Pokémon Switch (GFT/DAT XOR encryption)
+          def crypt_gf_text(data_bytes, entry_idx):
+              key = (0x7C89 + entry_idx * 0x2983) & 0xFFFF
+              out = bytearray(len(data_bytes))
+              for i in range(0, len(data_bytes) - 1, 2):
+                  val = struct.unpack_from("<H", data_bytes, i)[0] ^ key
+                  struct.pack_into("<H", out, i, val)
+                  key = ((key << 3) | (key >> 13)) & 0xFFFF
+              return bytes(out)
+
+          def parse_gf_dat(dat_bytes):
+              if len(dat_bytes) < 16:
+                  return None
+              sec_count, entry_count, total_size, initial_key, sec_offset = struct.unpack_from("<HHIII", dat_bytes, 0)
+              if sec_count != 1 or sec_offset != 0x10 or total_size > len(dat_bytes):
+                  return None
+              sec_size = struct.unpack_from("<I", dat_bytes, sec_offset)[0]
+              entries = []
+              for i in range(entry_count):
+                  off, char_len, _ = struct.unpack_from("<IHH", dat_bytes, sec_offset + 4 + i * 8)
+                  raw_str = dat_bytes[sec_offset + off : sec_offset + off + char_len * 2]
+                  dec = crypt_gf_text(raw_str, i)
+                  # แปลง UTF-16LE พร้อมเก็บ Control Tags (0x0010) เป็นรหัส [TAG:...]
+                  chars = []
+                  idx = 0
+                  while idx + 1 < len(dec):
+                      u = struct.unpack_from("<H", dec, idx)[0]
+                      idx += 2
+                      if u == 0x0000:
+                          break
+                      elif u == 0x0010 and idx + 3 < len(dec):
+                          tag_len, tag_type = struct.unpack_from("<HH", dec, idx)
+                          idx += 4
+                          params = []
+                          for _ in range(max(0, tag_len - 1)):
+                              if idx + 1 < len(dec):
+                                  params.append(f"{struct.unpack_from('<H', dec, idx)[0]:04X}")
+                                  idx += 2
+                          chars.append(f"[TAG:{tag_type:04X}:{','.join(params)}]")
+                      elif u == 0x000A:
+                          chars.append("\n")
+                      else:
+                          chars.append(chr(u))
+                  entries.append("".join(chars))
+              return entries
+
+          def build_gf_dat(entries):
+              encoded_entries = []
+              for i, text in enumerate(entries):
+                  buf = bytearray()
+                  pos = 0
+                  while pos < len(text):
+                      if text.startswith("[TAG:", pos):
+                          end = text.find("]", pos)
+                          if end != -1:
+                              parts = text[pos+5:end].split(":")
+                              tag_type = int(parts[0], 16)
+                              params = [int(x, 16) for x in parts[1].split(",") if x]
+                              buf += struct.pack("<HHH", 0x0010, len(params) + 1, tag_type)
+                              for p in params:
+                                  buf += struct.pack("<H", p)
+                              pos = end + 1
+                              continue
+                      ch = text[pos]
+                      if ch == "\n":
+                          buf += struct.pack("<H", 0x000A)
+                      else:
+                          buf += struct.pack("<H", ord(ch))
+                      pos += 1
+                  buf += struct.pack("<H", 0x0000)
+                  enc = crypt_gf_text(bytes(buf), i)
+                  # จัดเรียงให้หาร 4 ลงตัว (4-byte alignment)
+                  while len(enc) % 4 != 0:
+                      enc += b"\x00\x00"
+                  encoded_entries.append((enc, len(buf) // 2))
+
+              table_size = 4 + len(encoded_entries) * 8
+              cur_off = table_size
+              table = bytearray(struct.pack("<I", 0))
+              body = bytearray()
+              for enc, char_len in encoded_entries:
+                  table += struct.pack("<IHH", cur_off, char_len, 0)
+                  body += enc
+                  cur_off += len(enc)
+              struct.pack_into("<I", table, 0, cur_off)
+              header = struct.pack("<HHIII", 1, len(encoded_entries), cur_off, 0, 0x10)
+              return bytes(header + table + body)
+
+          # --- 2. ตัวถอดรหัส/เข้ารหัส Nintendo Binary Font (.BFOTF) ---
+          # BFOTF ของ Switch คือไฟล์ OTF ที่ครอบ Header หรือเข้ารหัส XOR ด้วย Key คงที่
+          def patch_bfotf_with_thai(bfotf_bytes, thai_ttf_path):
+              # ค้นหาหัวไฟล์ OTF ('OTTO') หรือ TTF (\x00\x01\x00\x00) ภายใน BFOTF
+              otf_idx = bfotf_bytes.find(b"OTTO")
+              if otf_idx == -1:
+                  otf_idx = bfotf_bytes.find(b"\x00\x01\x00\x00")
+              if otf_idx == -1:
+                  print("BFOTF is XOR-encrypted or custom wrapped; keeping header info.")
+                  return None
+              prefix = bfotf_bytes[:otf_idx]
+              orig_font_bytes = bfotf_bytes[otf_idx:]
+              tmp_orig = "/tmp/orig_game_font.otf"
+              tmp_thai = "/tmp/thai_scaled.ttf"
+              tmp_merged = "/tmp/merged_thai_font.otf"
+              with open(tmp_orig, "wb") as f:
+                  f.write(orig_font_bytes)
+
+              # ปรับขนาด UPM (Units Per Em) ของฟอนต์ไทยให้ตรงกับฟอนต์เกมต้นฉบับ
+              game_font = TTFont(tmp_orig)
+              target_upm = game_font["head"].unitsPerEm
+              game_font.close()
+
+              thai_font = TTFont(thai_ttf_path)
+              scale = target_upm / thai_font["head"].unitsPerEm
+              if abs(scale - 1.0) > 0.01:
+                  from fontTools.ttLib.scaleUpem import scale_upem
+                  scale_upem(thai_font, target_upm)
+              thai_font.save(tmp_thai)
+              thai_font.close()
+
+              merger = Merger()
+              merged = merger.merge([tmp_orig, tmp_thai])
+              merged.save(tmp_merged)
+              merged.close()
+
+              with open(tmp_merged, "rb") as f:
+                  new_font_bytes = f.read()
+              return prefix + new_font_bytes
+          EOF
+
+          if [ "$MODE" = "export" ]; then
+            python3 - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/out" "$RUNNER_TEMP/gf_tools.py" << 'EOF'
+          import os, sys, json, importlib.util
+          sys.path.insert(0, os.path.abspath("dm/tools"))
+          import romfs
+
+          spec = importlib.util.spec_from_file_location("gf_tools", sys.argv[3])
+          gf = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gf)
+
+          img_path, out_dir = sys.argv[1], sys.argv[2]
+          img = romfs.Image(img_path)
+
+          os.makedirs(os.path.join(out_dir, "json_text"), exist_ok=True)
+          os.makedirs(os.path.join(out_dir, "raw_backup"), exist_ok=True)
+          os.makedirs(os.path.join(out_dir, "thai_fonts"), exist_ok=True)
+
+          thai_ttf = "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf"
+          if not os.path.exists(thai_ttf):
+              for r, _, fs in os.walk("/usr/share/fonts"):
+                  for fn in fs:
+                      if "Thai" in fn and fn.endswith(".ttf"):
+                          thai_ttf = os.path.join(r, fn)
+                          break
+
+          with open(img_path, "rb") as raw_f:
+              stack = [(0, "")]
+              dat_ok, font_ok = 0, 0
+              while stack:
+                  k, rel_path = stack.pop()
+                  a, b, _, _, t, _ = img.entry(k)
+                  if t == 1:
+                      low = rel_path.lower()
+                      if "message/english/" in low or "bin/font/" in low:
+                          raw_f.seek(a)
+                          data = raw_f.read(b)
+                          # เก็บไฟล์ต้นฉบับไว้สำรองสำหรับโหมด build
+                          bak = os.path.join(out_dir, "raw_backup", rel_path)
+                          os.makedirs(os.path.dirname(bak), exist_ok=True)
+                          with open(bak, "wb") as bf:
+                              bf.write(data)
+
+                          if low.endswith(".dat") and "message/english/" in low:
+                              parsed = gf.parse_gf_dat(data)
+                              if parsed is not None:
+                                  jpath = os.path.join(out_dir, "json_text", rel_path + ".json")
+                                  os.makedirs(os.path.dirname(jpath), exist_ok=True)
+                                  with open(jpath, "w", encoding="utf-8") as jf:
+                                      json.dump(
+                                          [{"id": idx, "en": txt, "th": ""} for idx, txt in enumerate(parsed)],
+                                          jf, ensure_ascii=False, indent=2
+                                      )
+                                  dat_ok += 1
+
+                          if low.endswith(".bfotf") and "or_font" not in low:
+                              patched = gf.patch_bfotf_with_thai(data, thai_ttf)
+                              fpath = os.path.join(out_dir, "thai_fonts", rel_path)
+                              os.makedirs(os.path.dirname(fpath), exist_ok=True)
+                              with open(fpath, "wb") as ff:
+                                  ff.write(patched if patched else data)
+                              if patched:
+                                  font_ok += 1
+                  else:
+                      for child_name, child_idx in img.children(k):
+                          child_rel = f"{rel_path}/{child_name}" if rel_path else child_name
+                          stack.append((child_idx, child_rel))
+
+          print(f"Exported {dat_ok} JSON text files and patched {font_ok} Thai BFOTF fonts!")
+          EOF
+          fi
+
+      - name: Upload Thai Translation Kit
+        if: inputs.mode == 'export'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thai-translation-kit
+          path: ${{ runner.temp }}/out/
