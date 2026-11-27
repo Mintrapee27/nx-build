@@ -369,7 +369,7 @@ jobs:
           print(f"Exported {dat_ok} JSON text files and patched {font_ok} Thai BFOTF fonts!", flush=True)
           EOF
 
-          elif [ "$MODE" = "build" ] \vert{}\vert{} [ "$MODE" = "translate_all" ]; then
+          elif [ "$MODE" = "build" ] || [ "$MODE" = "translate_all" ]; then
             if [ -n "$MOD_ZIP_URL" ]; then
               download_file "$MOD_ZIP_URL" "$RUNNER_TEMP/raw/mod_in.zip"
               7z x "$RUNNER_TEMP/raw/mod_in.zip" -o"$RUNNER_TEMP/mod_in" -y >/dev/null
@@ -458,4 +458,36 @@ jobs:
                               print(f"Injected Thai font into: {rel_path}", flush=True)
                       else:
                           raw_f.seek(a)
-                          with open(
+                          with open(dest, "wb") as out_f:
+                              rem = b
+                              while rem > 0:
+                                  chunk = raw_f.read(min(rem, 8 * 1024 * 1024))
+                                  if not chunk:
+                                      break
+                                  out_f.write(chunk)
+                                  rem -= len(chunk)
+                  else:
+                      os.makedirs(dest, exist_ok=True)
+                      for child_name, child_idx in img.children(k):
+                          stack.append((child_idx, f"{rel_path}/{child_name}" if rel_path else child_name))
+
+          print(f"Summary: Injected {patched_texts} Thai text file(s) & {patched_fonts} Thai font(s).", flush=True)
+          EOF
+
+            python3 -u dm/tools/romfs_image.py "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/out/RomFS.img"
+            ls -lh "$RUNNER_TEMP/out/RomFS.img"
+          fi
+
+      - name: Upload Thai Translation Kit
+        if: inputs.mode == 'export'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thai-translation-kit
+          path: ${{ runner.temp }}/out/
+
+      - name: Upload Built Thai RomFS.img
+        if: inputs.mode == 'build' || inputs.mode == 'translate_all'
+        uses: actions/upload-artifact@v4
+        with:
+          name: thai-romfs-image
+          path: ${{ runner.temp }}/out/RomFS.img
