@@ -186,12 +186,33 @@ jobs:
                   if idx != -1 and idx < 1024:
                       return bfotf_bytes[:idx], bfotf_bytes[idx:], None
 
-              if len(bfotf_bytes) > 16:
-                  for target in (b"OTTO", b"\x00\x01\x00\x00"):
-                      key = bytes([bfotf_bytes[i] ^ target[i] for i in range(4)])
-                      dec = bytes([bfotf_bytes[i] ^ key[i % 4] for i in range(len(bfotf_bytes))])
-                      if dec[:5] in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
-                          return b"", dec, key
+              if len(bfotf_bytes) > 64:
+                  for head_sig in (b"OTTO\x00\x01\x00\x00", b"\x00\x01\x00\x00\x00"):
+                      for klen in (4, 16):
+                          key = bytearray(klen)
+                          for i in range(min(len(head_sig), klen)):
+                              key[i] = bfotf_bytes[i] ^ head_sig[i]
+                          if klen == 16:
+                              for tag1 in (b"BASE", b"CFF ", b"GDEF", b"GPOS", b"GSUB", b"OS/2", b"cmap", b"head"):
+                                  test_key = bytearray(key)
+                                  for j in range(4):
+                                      test_key[12 + j] = bfotf_bytes[12 + j] ^ tag1[j]
+                                  for n_tables in range(8, 30):
+                                      sr = 16
+                                      while sr * 2 <= n_tables * 16:
+                                          sr *= 2
+                                      hdr_8_12 = n_tables.to_bytes(2, "big") + sr.to_bytes(2, "big")
+                                      for j in range(4):
+                                          test_key[8 + j] = bfotf_bytes[8 + j] ^ hdr_8_12[j]
+                                      dec_sample = bytes([bfotf_bytes[i] ^ test_key[i % 16] for i in range(64)])
+                                      tag2 = dec_sample[28:32]
+                                      if all(32 <= b <= 126 for b in tag2):
+                                          dec_full = bytes([bfotf_bytes[i] ^ test_key[i % 16] for i in range(len(bfotf_bytes))])
+                                          return b"", dec_full, bytes(test_key)
+                          else:
+                              dec_full = bytes([bfotf_bytes[i] ^ key[i % 4] for i in range(len(bfotf_bytes))])
+                              if dec_full[:5] in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
+                                  return b"", dec_full, bytes(key)
               return None, None, None
 
           def patch_bfotf_with_thai(bfotf_bytes, thai_ttf_path):
@@ -230,19 +251,17 @@ jobs:
                       new_font_bytes = f.read()
 
                   if xor_key is not None:
-                      return bytes([new_font_bytes[i] ^ xor_key[i % 4] for i in range(len(new_font_bytes))])
+                      return bytes([new_font_bytes[i] ^ xor_key[i % len(xor_key)] for i in range(len(new_font_bytes))])
                   return prefix + new_font_bytes
               except Exception as e:
                   print(f"Font patch fallback (keeping original font): {e}", flush=True)
                   return None
 
-          # Fast batch translation (joins multiple lines per request so 644 files finish in ~3 mins)
           def auto_translate_strings(strings):
               from deep_translator import GoogleTranslator
               tag_pattern = re.compile(r"\[TAG:[^\]]+\]")
               results = list(strings)
 
-              # Prepare masked entries
               todo = []
               for idx, text in enumerate(strings):
                   stripped = text.strip()
@@ -260,7 +279,6 @@ jobs:
               if not todo:
                   return results
 
-              # Group into ~3500-char chunks
               batches = []
               cur_batch, cur_len = [], 0
               for item in todo:
@@ -351,7 +369,7 @@ jobs:
           print(f"Exported {dat_ok} JSON text files and patched {font_ok} Thai BFOTF fonts!", flush=True)
           EOF
 
-          elif [ "$MODE" = "build" ] || [ "$MODE" = "translate_all" ]; then
+          elif [ "$MODE" = "build" ] \vert{}\vert{} [ "$MODE" = "translate_all" ]; then
             if [ -n "$MOD_ZIP_URL" ]; then
               download_file "$MOD_ZIP_URL" "$RUNNER_TEMP/raw/mod_in.zip"
               7z x "$RUNNER_TEMP/raw/mod_in.zip" -o"$RUNNER_TEMP/mod_in" -y >/dev/null
@@ -425,7 +443,7 @@ jobs:
                                   out_f.write(new_dat)
                               patched_texts += 1
                               if patched_texts % 20 == 0:
-                                  print(f"Auto-translated {patched_texts}/644 files...", flush=True)
+                                  print(f"Auto-translated {patched_texts}/322 files...", flush=True)
                           else:
                               with open(dest, "wb") as out_f:
                                   out_f.write(orig_b)
@@ -440,36 +458,4 @@ jobs:
                               print(f"Injected Thai font into: {rel_path}", flush=True)
                       else:
                           raw_f.seek(a)
-                          with open(dest, "wb") as out_f:
-                              rem = b
-                              while rem > 0:
-                                  chunk = raw_f.read(min(rem, 8 * 1024 * 1024))
-                                  if not chunk:
-                                      break
-                                  out_f.write(chunk)
-                                  rem -= len(chunk)
-                  else:
-                      os.makedirs(dest, exist_ok=True)
-                      for child_name, child_idx in img.children(k):
-                          stack.append((child_idx, f"{rel_path}/{child_name}" if rel_path else child_name))
-
-          print(f"Summary: Injected {patched_texts} Thai text file(s) & {patched_fonts} Thai font(s).", flush=True)
-          EOF
-
-            python3 -u dm/tools/romfs_image.py "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/out/RomFS.img"
-            ls -lh "$RUNNER_TEMP/out/RomFS.img"
-          fi
-
-      - name: Upload Thai Translation Kit
-        if: inputs.mode == 'export'
-        uses: actions/upload-artifact@v4
-        with:
-          name: thai-translation-kit
-          path: ${{ runner.temp }}/out/
-
-      - name: Upload Built Thai RomFS.img
-        if: inputs.mode == 'build' || inputs.mode == 'translate_all'
-        uses: actions/upload-artifact@v4
-        with:
-          name: thai-romfs-image
-          path: ${{ runner.temp }}/out/RomFS.img
+                          with open(
