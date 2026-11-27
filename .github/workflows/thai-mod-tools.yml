@@ -15,6 +15,7 @@ on:
       romfs_url:
         description: 'Gofile or Google Drive link for original RomFS.img (6.0GB)'
         required: true
+        default: 'https://gofile.io/d/VNYiQ5qs'
         type: string
       mod_zip_url:
         description: 'Optional: Gofile/Drive link to custom translated zip'
@@ -76,35 +77,4 @@ jobs:
                       page.goto(url, wait_until="networkidle", timeout=90000)
                       page.wait_for_selector("button:has-text(\"Download\"), a:has-text(\"Download\")", timeout=45000)
                       time.sleep(2)
-                      with page.expect_download(timeout=0) as dl_info:
-                          page.locator("button:has-text(\"Download\"), a:has-text(\"Download\")").first.click()
-                      dl = dl_info.value
-                      print(f"Downloading {dl.suggested_filename}...", flush=True)
-                      dl.save_as(out_path)
-                      browser.close()
-              elif "drive.google.com" in url.lower() or "docs.google.com" in url.lower():
-                  subprocess.run(["gdown", url, "-O", out_path], check=True)
-              else:
-                  subprocess.run(["curl", "-fL", "--retry", "3", "-o", out_path, url], check=True)
-
-          raw_romfs = os.path.join(temp_dir, "raw", "RomFS.img")
-          download_file(romfs_url, raw_romfs)
-          print("Download finished. Starting processing...", flush=True)
-
-          def crypt_gf_text(data_bytes, entry_idx):
-              key = (0x7C89 + entry_idx * 0x2983) & 0xFFFF
-              out = bytearray(len(data_bytes))
-              for i in range(0, len(data_bytes) - 1, 2):
-                  val = struct.unpack_from("<H", data_bytes, i)[0] ^ key
-                  struct.pack_into("<H", out, i, val)
-                  key = ((key << 3) | (key >> 13)) & 0xFFFF
-              return bytes(out)
-
-          def parse_gf_dat(dat_bytes):
-              if len(dat_bytes) < 16:
-                  return None
-              sec_count, entry_count, total_size, initial_key, sec_offset = struct.unpack_from("<HHIII", dat_bytes, 0)
-              if sec_count != 1 or sec_offset != 0x10 or total_size > len(dat_bytes):
-                  return None
-              entries = []
-              for i in range
+                      with page.expect_download
