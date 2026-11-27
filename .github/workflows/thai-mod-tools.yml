@@ -1,22 +1,23 @@
-name: Thai Mod Tools (Export Text & Build RomFS)
+name: Thai Mod Tools (Export, Auto-Translate & Build RomFS)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Select mode: export (get JSON + Thai BFOTF) or build (pack Thai RomFS.img)'
+        description: 'Select mode: build (pack Thai RomFS.img), translate_all (auto-translate full game + build), or export'
         required: true
         default: 'build'
         type: choice
         options:
-          - export
           - build
+          - translate_all
+          - export
       romfs_url:
         description: 'Gofile or Google Drive link for original RomFS.img (6.0GB)'
         required: true
         type: string
       mod_zip_url:
-        description: 'For [build] mode: Gofile/Drive link to translated zip'
+        description: 'For [build] mode: Gofile/Drive link to translated zip (optional)'
         required: false
         default: ''
         type: string
@@ -39,7 +40,7 @@ jobs:
       - name: Install tools & Python libraries
         run: |
           sudo apt-get update && sudo apt-get install -y p7zip-full unar curl fonts-noto-core
-          python -m pip install gdown playwright fonttools
+          python -m pip install gdown playwright fonttools deep-translator
           playwright install chromium
 
       - name: Run Thai Mod Pipeline
@@ -85,12 +86,11 @@ jobs:
             fi
           }
 
-          # โหลด RomFS.img ต้นฉบับ
           download_file "$ROMFS_URL" "$RUNNER_TEMP/raw/RomFS.img"
 
-          # โมดูลจัดการ Game Freak Message (.dat) และฟอนต์ไทย (.BFOTF)
           cat << 'EOF' > "$RUNNER_TEMP/gf_tools.py"
-          import os, sys, json, struct
+          import os, sys, json, re, time, struct
+          from concurrent.futures import ThreadPoolExecutor
           from fontTools.ttLib import TTFont
           from fontTools.merge import Merger
 
@@ -179,53 +179,89 @@ jobs:
               return bytes(header + table + body)
 
           def decode_bfotf(bfotf_bytes):
-              for sig in (b"OTTO", b"\x00\x01\x00\x00"):
+              for sig in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
                   idx = bfotf_bytes.find(sig)
-                  if idx != -1 and idx < 256:
+                  if idx != -1 and idx < 1024:
                       return bfotf_bytes[:idx], bfotf_bytes[idx:], None
 
               if len(bfotf_bytes) > 16:
-                  target = b"OTTO"
-                  key = bytes([bfotf_bytes[i] ^ target[i] for i in range(4)])
-                  dec = bytes([bfotf_bytes[i] ^ key[i % 4] for i in range(len(bfotf_bytes))])
-                  if dec[:4] == b"OTTO":
-                      return b"", dec, key
+                  for target in (b"OTTO", b"\x00\x01\x00\x00"):
+                      key = bytes([bfotf_bytes[i] ^ target[i] for i in range(4)])
+                      dec = bytes([bfotf_bytes[i] ^ key[i % 4] for i in range(len(bfotf_bytes))])
+                      if dec[:5] in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
+                          return b"", dec, key
               return None, None, None
 
           def patch_bfotf_with_thai(bfotf_bytes, thai_ttf_path):
-              prefix, orig_font_bytes, xor_key = decode_bfotf(bfotf_bytes)
-              if orig_font_bytes is None:
-                  print(f"Warning: Unknown BFOTF header: {bfotf_bytes[:16].hex()}")
+              try:
+                  prefix, orig_font_bytes, xor_key = decode_bfotf(bfotf_bytes)
+                  if orig_font_bytes is None:
+                      print(f"Skipping BFOTF (no SFNT header found): {bfotf_bytes[:16].hex()}")
+                      return None
+
+                  tmp_orig = "/tmp/orig_game_font.otf"
+                  tmp_thai = "/tmp/thai_scaled.ttf"
+                  tmp_merged = "/tmp/merged_thai_font.otf"
+                  with open(tmp_orig, "wb") as f:
+                      f.write(orig_font_bytes)
+
+                  game_font = TTFont(tmp_orig)
+                  if "head" not in game_font:
+                      game_font.close()
+                      return None
+                  target_upm = game_font["head"].unitsPerEm
+                  game_font.close()
+
+                  thai_font = TTFont(thai_ttf_path)
+                  if abs(target_upm - thai_font["head"].unitsPerEm) > 1:
+                      from fontTools.ttLib.scaleUpem import scale_upem
+                      scale_upem(thai_font, target_upm)
+                  thai_font.save(tmp_thai)
+                  thai_font.close()
+
+                  merger = Merger()
+                  merged = merger.merge([tmp_orig, tmp_thai])
+                  merged.save(tmp_merged)
+                  merged.close()
+
+                  with open(tmp_merged, "rb") as f:
+                      new_font_bytes = f.read()
+
+                  if xor_key is not None:
+                      return bytes([new_font_bytes[i] ^ xor_key[i % 4] for i in range(len(new_font_bytes))])
+                  return prefix + new_font_bytes
+              except Exception as e:
+                  print(f"Font patch fallback (keeping original font): {e}")
                   return None
 
-              tmp_orig = "/tmp/orig_game_font.otf"
-              tmp_thai = "/tmp/thai_scaled.ttf"
-              tmp_merged = "/tmp/merged_thai_font.otf"
-              with open(tmp_orig, "wb") as f:
-                  f.write(orig_font_bytes)
+          def auto_translate_strings(strings):
+              from deep_translator import GoogleTranslator
+              tag_pattern = re.compile(r"\[TAG:[^\]]+\]")
 
-              game_font = TTFont(tmp_orig)
-              target_upm = game_font["head"].unitsPerEm
-              game_font.close()
+              def translate_one(text):
+                  stripped = text.strip()
+                  if not stripped or stripped.lower() == "n/a":
+                      return text
+                  tags = []
+                  def repl(m):
+                      tags.append(m.group(0))
+                      return f" __T{len(tags)-1}__ "
+                  masked = tag_pattern.sub(repl, text)
+                  if not re.sub(r"__T\d+__", "", masked).strip():
+                      return text
+                  for attempt in range(3):
+                      try:
+                          tr = GoogleTranslator(source="en", target="th").translate(masked)
+                          if tr:
+                              for idx, orig_tag in enumerate(tags):
+                                  tr = re.sub(rf"\s*__T{idx}__\s*", orig_tag, tr, flags=re.IGNORECASE)
+                              return tr
+                      except Exception:
+                          time.sleep(0.5 * (attempt + 1))
+                  return text
 
-              thai_font = TTFont(thai_ttf_path)
-              if abs(target_upm - thai_font["head"].unitsPerEm) > 1:
-                  from fontTools.ttLib.scaleUpem import scale_upem
-                  scale_upem(thai_font, target_upm)
-              thai_font.save(tmp_thai)
-              thai_font.close()
-
-              merger = Merger()
-              merged = merger.merge([tmp_orig, tmp_thai])
-              merged.save(tmp_merged)
-              merged.close()
-
-              with open(tmp_merged, "rb") as f:
-                  new_font_bytes = f.read()
-
-              if xor_key is not None:
-                  return bytes([new_font_bytes[i] ^ xor_key[i % 4] for i in range(len(new_font_bytes))])
-              return prefix + new_font_bytes
+              with ThreadPoolExecutor(max_workers=8) as ex:
+                  return list(ex.map(translate_one, strings))
           EOF
 
           THAI_TTF="/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf"
@@ -243,7 +279,6 @@ jobs:
 
           img_path, out_dir, thai_ttf = sys.argv[1], sys.argv[2], sys.argv[4]
           img = romfs.Image(img_path)
-
           os.makedirs(os.path.join(out_dir, "json_text"), exist_ok=True)
           os.makedirs(os.path.join(out_dir, "thai_fonts"), exist_ok=True)
 
@@ -280,13 +315,13 @@ jobs:
           print(f"Exported {dat_ok} JSON text files and patched {font_ok} Thai BFOTF fonts!")
           EOF
 
-          elif [ "$MODE" = "build" ]; then
+          elif [ "$MODE" = "build" ] || [ "$MODE" = "translate_all" ]; then
             if [ -n "$MOD_ZIP_URL" ]; then
               download_file "$MOD_ZIP_URL" "$RUNNER_TEMP/raw/mod_in.zip"
               7z x "$RUNNER_TEMP/raw/mod_in.zip" -o"$RUNNER_TEMP/mod_in" -y >/dev/null
             fi
 
-            python3 - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/mod_in" "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/gf_tools.py" "$THAI_TTF" << 'EOF'
+            python3 - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/mod_in" "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/gf_tools.py" "$THAI_TTF" "$MODE" << 'EOF'
           import os, sys, json, importlib.util
           sys.path.insert(0, os.path.abspath("dm/tools"))
           import romfs
@@ -295,10 +330,9 @@ jobs:
           gf = importlib.util.module_from_spec(spec)
           spec.loader.exec_module(gf)
 
-          img_path, mod_dir, tree_dir, thai_ttf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[5]
+          img_path, mod_dir, tree_dir, thai_ttf, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[5], sys.argv[6]
           img = romfs.Image(img_path)
 
-          # รองรับทั้งกรณี zip มาทั้งโครงสร้างโฟลเดอร์ และกรณี zip มาเฉพาะไฟล์ *.dat.json หรือ *.json
           translated_by_path = {}
           translated_by_name = {}
           for r, _, fs in os.walk(mod_dir):
@@ -317,7 +351,7 @@ jobs:
                           rel_dat = norm[idx:-5] if norm.endswith(".dat.json") else (norm[idx:-5] + ".dat")
                           translated_by_path[rel_dat.lower()] = full_p
 
-          print(f"Loaded {len(translated_by_name)} translated JSON file(s): {list(translated_by_name.keys())}")
+          print(f"Mode={mode} | Loaded {len(translated_by_name)} custom JSON file(s)")
 
           patched_texts = 0
           patched_fonts = 0
@@ -343,7 +377,22 @@ jobs:
                           with open(dest, "wb") as out_f:
                               out_f.write(new_dat)
                           patched_texts += 1
-                          print(f"Injected Thai text into: {rel_path}")
+                          print(f"Injected custom Thai text: {rel_path}")
+                      elif mode == "translate_all" and low.endswith(".dat") and "message/english/" in low:
+                          raw_f.seek(a)
+                          orig_b = raw_f.read(b)
+                          parsed = gf.parse_gf_dat(orig_b)
+                          if parsed is not None:
+                              th_strings = gf.auto_translate_strings(parsed)
+                              new_dat = gf.build_gf_dat(th_strings)
+                              with open(dest, "wb") as out_f:
+                                  out_f.write(new_dat)
+                              patched_texts += 1
+                              if patched_texts % 25 == 0:
+                                  print(f"Auto-translated {patched_texts} files so far...")
+                          else:
+                              with open(dest, "wb") as out_f:
+                                  out_f.write(orig_b)
                       elif low.endswith(".bfotf") and "bin/font/" in low and "or_font" not in low:
                           raw_f.seek(a)
                           orig_b = raw_f.read(b)
@@ -371,7 +420,6 @@ jobs:
           print(f"Summary: Injected {patched_texts} Thai text file(s) & {patched_fonts} Thai font(s).")
           EOF
 
-            # แพ็กกลับเป็น RomFS.img (DMROMFS1) ด้วยสคริปต์ของโปรเจกต์โดยตรง
             python3 dm/tools/romfs_image.py "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/out/RomFS.img"
             ls -lh "$RUNNER_TEMP/out/RomFS.img"
           fi
@@ -384,7 +432,7 @@ jobs:
           path: ${{ runner.temp }}/out/
 
       - name: Upload Built Thai RomFS.img
-        if: inputs.mode == 'build'
+        if: inputs.mode == 'build' || inputs.mode == 'translate_all'
         uses: actions/upload-artifact@v4
         with:
           name: thai-romfs-image
