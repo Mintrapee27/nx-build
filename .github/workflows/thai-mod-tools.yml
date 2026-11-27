@@ -40,7 +40,7 @@ jobs:
       - name: Install tools & Python libraries
         run: |
           sudo apt-get update && sudo apt-get install -y p7zip-full unar curl fonts-noto-core
-          python -m pip install gdown playwright fonttools deep-translator
+          python -m pip install gdown playwright fonttools deep-translator zstandard
           playwright install chromium
 
       - name: Run Thai Mod Pipeline
@@ -91,10 +91,20 @@ jobs:
           echo "Download finished. Starting processing..."
 
           cat << 'EOF' > "$RUNNER_TEMP/gf_tools.py"
-          import os, sys, json, re, time, struct
+          import os, sys, json, re, time, struct, zlib
           from concurrent.futures import ThreadPoolExecutor
           from fontTools.ttLib import TTFont
           from fontTools.merge import Merger
+
+          def is_english_msg_path(low_path):
+              if not low_path.endswith(".dat"):
+                  return False
+              return any(k in low_path for k in (
+                  "message/english/",
+                  "message/usa_english/",
+                  "message/uk_english/",
+                  "message/eng/"
+              ))
 
           def crypt_gf_text(data_bytes, entry_idx):
               key = (0x7C89 + entry_idx * 0x2983) & 0xFFFF
@@ -180,46 +190,83 @@ jobs:
               header = struct.pack("<HHIII", 1, len(encoded_entries), cur_off, 0, 0x10)
               return bytes(header + table + body)
 
-          def decode_bfotf(bfotf_bytes):
+          def extract_sfnt_from_raw(raw_bytes):
               for sig in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
-                  idx = bfotf_bytes.find(sig)
-                  if idx != -1 and idx < 1024:
-                      return bfotf_bytes[:idx], bfotf_bytes[idx:], None
+                  idx = raw_bytes.find(sig)
+                  if idx != -1 and idx < 2048:
+                      return raw_bytes[:idx], raw_bytes[idx:], None
 
-              if len(bfotf_bytes) > 64:
+              if len(raw_bytes) > 64:
                   for head_sig in (b"OTTO\x00\x01\x00\x00", b"\x00\x01\x00\x00\x00"):
                       for klen in (4, 16):
                           key = bytearray(klen)
                           for i in range(min(len(head_sig), klen)):
-                              key[i] = bfotf_bytes[i] ^ head_sig[i]
-                          if klen == 16:
-                              for tag1 in (b"BASE", b"CFF ", b"GDEF", b"GPOS", b"GSUB", b"OS/2", b"cmap", b"head"):
+                              key[i] = raw_bytes[i] ^ head_sig[i]
+                          if klen == 4:
+                              dec_full = bytes([raw_bytes[i] ^ key[i % 4] for i in range(len(raw_bytes))])
+                              if dec_full[:5] in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
+                                  return b"", dec_full, bytes(key)
+                          else:
+                              for tag1 in (b"BASE", b"CFF ", b"DSIG", b"GDEF", b"GPOS", b"GSUB", b"OS/2", b"cmap", b"head", b"hhea", b"maxp", b"name"):
                                   test_key = bytearray(key)
                                   for j in range(4):
-                                      test_key[12 + j] = bfotf_bytes[12 + j] ^ tag1[j]
-                                  for n_tables in range(8, 30):
+                                      test_key[12 + j] = raw_bytes[12 + j] ^ tag1[j]
+                                  for n_tables in range(6, 36):
                                       sr = 16
                                       while sr * 2 <= n_tables * 16:
                                           sr *= 2
                                       hdr_8_12 = n_tables.to_bytes(2, "big") + sr.to_bytes(2, "big")
                                       for j in range(4):
-                                          test_key[8 + j] = bfotf_bytes[8 + j] ^ hdr_8_12[j]
-                                      dec_sample = bytes([bfotf_bytes[i] ^ test_key[i % 16] for i in range(64)])
+                                          test_key[8 + j] = raw_bytes[8 + j] ^ hdr_8_12[j]
+                                      dec_sample = bytes([raw_bytes[i] ^ test_key[i % 16] for i in range(64)])
                                       tag2 = dec_sample[28:32]
                                       if all(32 <= b <= 126 for b in tag2):
-                                          dec_full = bytes([bfotf_bytes[i] ^ test_key[i % 16] for i in range(len(bfotf_bytes))])
+                                          dec_full = bytes([raw_bytes[i] ^ test_key[i % 16] for i in range(len(raw_bytes))])
                                           return b"", dec_full, bytes(test_key)
-                          else:
-                              dec_full = bytes([bfotf_bytes[i] ^ key[i % 4] for i in range(len(bfotf_bytes))])
-                              if dec_full[:5] in (b"OTTO\x00", b"\x00\x01\x00\x00\x00"):
-                                  return b"", dec_full, bytes(key)
+              return None, None, None
+
+          def decode_bfotf(bfotf_bytes):
+              # 1. Direct or XOR-encrypted SFNT
+              res = extract_sfnt_from_raw(bfotf_bytes)
+              if res[1] is not None:
+                  return ("raw", res[0]), res[1], res[2]
+
+              # 2. Zlib compressed (raw or after 4/8/12/16-byte header)
+              for off in (0, 4, 8, 12, 16, 20, 24, 32):
+                  if len(bfotf_bytes) <= off + 16:
+                      continue
+                  try:
+                      decompressed = zlib.decompress(bfotf_bytes[off:])
+                      res = extract_sfnt_from_raw(decompressed)
+                      if res[1] is not None:
+                          return ("zlib", bfotf_bytes[:off], res[0]), res[1], res[2]
+                  except Exception:
+                      pass
+
+              # 3. Zstd compressed (raw or after 4/8/12/16-byte header)
+              try:
+                  import zstandard as zstd
+                  dctx = zstd.ZstdDecompressor()
+                  for off in (0, 4, 8, 12, 16, 20, 24, 32):
+                      if len(bfotf_bytes) <= off + 16:
+                          continue
+                      try:
+                          decompressed = dctx.decompress(bfotf_bytes[off:], max_output_size=64 * 1024 * 1024)
+                          res = extract_sfnt_from_raw(decompressed)
+                          if res[1] is not None:
+                              return ("zstd", bfotf_bytes[:off], res[0]), res[1], res[2]
+                      except Exception:
+                          pass
+              except Exception:
+                  pass
+
               return None, None, None
 
           def patch_bfotf_with_thai(bfotf_bytes, thai_ttf_path):
               try:
-                  prefix, orig_font_bytes, xor_key = decode_bfotf(bfotf_bytes)
+                  wrapper, orig_font_bytes, xor_key = decode_bfotf(bfotf_bytes)
                   if orig_font_bytes is None:
-                      print(f"Skipping BFOTF (no SFNT header found): {bfotf_bytes[:16].hex()}", flush=True)
+                      print(f"Skipping BFOTF (unknown wrapper): len={len(bfotf_bytes)} head={bfotf_bytes[:32].hex()}", flush=True)
                       return None
 
                   tmp_orig = "/tmp/orig_game_font.otf"
@@ -251,8 +298,24 @@ jobs:
                       new_font_bytes = f.read()
 
                   if xor_key is not None:
-                      return bytes([new_font_bytes[i] ^ xor_key[i % len(xor_key)] for i in range(len(new_font_bytes))])
-                  return prefix + new_font_bytes
+                      inner_bytes = bytes([new_font_bytes[i] ^ xor_key[i % len(xor_key)] for i in range(len(new_font_bytes))])
+                  else:
+                      inner_bytes = wrapper[-1] + new_font_bytes
+
+                  if wrapper[0] == "raw":
+                      return inner_bytes
+                  elif wrapper[0] == "zlib":
+                      hdr = wrapper[1]
+                      if len(hdr) >= 4:
+                          hdr = struct.pack("<I", len(inner_bytes)) + hdr[4:]
+                      return hdr + zlib.compress(inner_bytes, level=6)
+                  elif wrapper[0] == "zstd":
+                      import zstandard as zstd
+                      hdr = wrapper[1]
+                      if len(hdr) >= 4:
+                          hdr = struct.pack("<I", len(inner_bytes)) + hdr[4:]
+                      return hdr + zstd.ZstdCompressor(level=6).compress(inner_bytes)
+                  return inner_bytes
               except Exception as e:
                   print(f"Font patch fallback (keeping original font): {e}", flush=True)
                   return None
@@ -344,7 +407,7 @@ jobs:
                   a, b, _, _, t, _ = img.entry(k)
                   if t == 1:
                       low = rel_path.lower()
-                      if low.endswith(".dat") and "message/english/" in low:
+                      if gf.is_english_msg_path(low):
                           raw_f.seek(a)
                           parsed = gf.parse_gf_dat(raw_f.read(b))
                           if parsed is not None:
@@ -407,6 +470,8 @@ jobs:
 
           print(f"Mode={mode} | Loaded {len(translated_by_name)} custom JSON file(s)", flush=True)
 
+          # Cache translated .dat bytes by (subpath_after_lang, filename) so English & USA_English share translation
+          translation_cache = {}
           patched_texts = 0
           patched_fonts = 0
           with open(img_path, "rb") as raw_f:
@@ -419,8 +484,9 @@ jobs:
                       os.makedirs(os.path.dirname(dest), exist_ok=True)
                       low = rel_path.lower()
                       fname = os.path.basename(low)
+                      is_eng = gf.is_english_msg_path(low)
                       json_file = None
-                      if "message/english/" in low:
+                      if is_eng:
                           json_file = translated_by_path.get(low) or translated_by_name.get(fname)
 
                       if json_file:
@@ -431,22 +497,29 @@ jobs:
                           with open(dest, "wb") as out_f:
                               out_f.write(new_dat)
                           patched_texts += 1
-                          print(f"Injected custom Thai text: {rel_path}", flush=True)
-                      elif mode == "translate_all" and low.endswith(".dat") and "message/english/" in low:
+                      elif mode == "translate_all" and is_eng:
                           raw_f.seek(a)
                           orig_b = raw_f.read(b)
-                          parsed = gf.parse_gf_dat(orig_b)
-                          if parsed is not None:
-                              th_strings = gf.auto_translate_strings(parsed)
-                              new_dat = gf.build_gf_dat(th_strings)
+                          cache_key = (os.path.basename(os.path.dirname(low)), fname, len(orig_b))
+                          if cache_key in translation_cache:
+                              new_dat = translation_cache[cache_key]
                               with open(dest, "wb") as out_f:
                                   out_f.write(new_dat)
                               patched_texts += 1
-                              if patched_texts % 20 == 0:
-                                  print(f"Auto-translated {patched_texts}/322 files...", flush=True)
                           else:
-                              with open(dest, "wb") as out_f:
-                                  out_f.write(orig_b)
+                              parsed = gf.parse_gf_dat(orig_b)
+                              if parsed is not None:
+                                  th_strings = gf.auto_translate_strings(parsed)
+                                  new_dat = gf.build_gf_dat(th_strings)
+                                  translation_cache[cache_key] = new_dat
+                                  with open(dest, "wb") as out_f:
+                                      out_f.write(new_dat)
+                                  patched_texts += 1
+                                  if patched_texts % 25 == 0:
+                                      print(f"Auto-translated {patched_texts} files (unique={len(translation_cache)})...", flush=True)
+                              else:
+                                  with open(dest, "wb") as out_f:
+                                      out_f.write(orig_b)
                       elif low.endswith(".bfotf") and "bin/font/" in low and "or_font" not in low:
                           raw_f.seek(a)
                           orig_b = raw_f.read(b)
