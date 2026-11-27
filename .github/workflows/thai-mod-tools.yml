@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Select mode: translate_all, build, or export'
+        description: 'Select mode: export (fast 2m font test), translate_all, or build'
         required: true
-        default: 'translate_all'
+        default: 'export'
         type: choice
         options:
+          - export
           - translate_all
           - build
-          - export
       romfs_url:
         description: 'Gofile or Google Drive link for original RomFS.img (6.0GB)'
         required: true
@@ -182,39 +182,42 @@ jobs:
 
           def decode_bfotf(bfotf_bytes):
               if bfotf_bytes[:4] in (b"OTTO", b"\x00\x01\x00\x00"):
-                  return bfotf_bytes, None
+                  return bfotf_bytes, None, b"", 0
               if len(bfotf_bytes) < 64:
-                  return None, None
+                  return None, None, b"", 0
 
-              # Recover 16-byte XOR key from SFNT header (OTTO 00010000 + numTables/searchRange + 1st table tag)
-              head_sig = b"OTTO\x00\x01\x00\x00"
-              base_key = bytearray(16)
-              for i in range(8):
-                  base_key[i] = bfotf_bytes[i] ^ head_sig[i]
+              fsize = len(bfotf_bytes)
+              # Try both full file size and payload size (minus 16/32/48/64 header) in LE & BE
+              for hdr_sub in (0, 16, 32, 48, 64):
+                  val = fsize - hdr_sub
+                  if val <= 0:
+                      continue
+                  for endian in ("little", "big"):
+                      sz_bytes = val.to_bytes(4, endian)
+                      key = bytearray(16)
+                      key[0:4] = bfotf_bytes[0:4]
+                      for i in range(4):
+                          key[4 + i] = bfotf_bytes[4 + i] ^ sz_bytes[i]
+                      key[8:16] = bfotf_bytes[8:16]
 
-              for tag1 in (b"BASE", b"CFF ", b"DSIG", b"GDEF", b"GPOS", b"GSUB", b"OS/2", b"cmap", b"head", b"hhea", b"maxp", b"name"):
-                  test_key = bytearray(base_key)
-                  for j in range(4):
-                      test_key[12 + j] = bfotf_bytes[12 + j] ^ tag1[j]
-                  for n_tables in range(4, 64):
-                      sr = 16
-                      while sr * 2 <= n_tables * 16:
-                          sr *= 2
-                      hdr_8_12 = n_tables.to_bytes(2, "big") + sr.to_bytes(2, "big")
-                      for j in range(4):
-                          test_key[8 + j] = bfotf_bytes[8 + j] ^ hdr_8_12[j]
-                      dec_64 = bytes([bfotf_bytes[i] ^ test_key[i % 16] for i in range(64)])
-                      es = int.from_bytes(dec_64[12:14], "big")
-                      rs = int.from_bytes(dec_64[14:16], "big")
-                      tag2 = dec_64[28:32]
-                      if es == int(__import__("math").log2(sr // 16)) and rs == (n_tables * 16 - sr) and all(32 <= b <= 126 for b in tag2):
-                          dec_full = bytes([bfotf_bytes[i] ^ test_key[i % 16] for i in range(len(bfotf_bytes))])
-                          return dec_full, bytes(test_key)
-              return None, None
+                      dec_head = bytes([bfotf_bytes[i] ^ key[i % 16] for i in range(96)])
+                      for off in (0, 16, 32, 48, 64):
+                          if dec_head[off:off+4] in (b"OTTO", b"\x00\x01\x00\x00"):
+                              dec_full = bytes([bfotf_bytes[i] ^ key[i % 16] for i in range(fsize)])
+                              return dec_full[off:], bytes(key), dec_full[:off], hdr_sub
+
+              # Fallback debug decode with full size LE
+              sz_le = fsize.to_bytes(4, "little")
+              key = bytearray(bfotf_bytes[:16])
+              for i in range(4):
+                  key[4 + i] ^= sz_le[i]
+              dec_dbg = bytes([bfotf_bytes[i] ^ key[i % 16] for i in range(64)])
+              print(f"Debug BFOTF dec_head={dec_dbg.hex()}", flush=True)
+              return None, None, b"", 0
 
           def patch_bfotf_with_thai(bfotf_bytes, thai_ttf_path):
               try:
-                  orig_font_bytes, xor_key = decode_bfotf(bfotf_bytes)
+                  orig_font_bytes, xor_key, prefix_hdr, hdr_sub = decode_bfotf(bfotf_bytes)
                   if orig_font_bytes is None:
                       print(f"Skipping BFOTF: head={bfotf_bytes[:32].hex()}", flush=True)
                       return None
@@ -248,8 +251,11 @@ jobs:
                       new_font_bytes = f.read()
 
                   if xor_key is not None:
-                      return bytes([new_font_bytes[i] ^ xor_key[i % 16] for i in range(len(new_font_bytes))])
-                  return new_font_bytes
+                      full_out = bytearray(prefix_hdr + new_font_bytes)
+                      if len(full_out) >= 8:
+                          struct.pack_into("<I", full_out, 4, len(full_out) - hdr_sub)
+                      return bytes([full_out[i] ^ xor_key[i % 16] for i in range(len(full_out))])
+                  return prefix_hdr + new_font_bytes
               except Exception as e:
                   print(f"Font patch fallback: {e}", flush=True)
                   return None
@@ -280,211 +286,4 @@ jobs:
               cur_batch, cur_len = [], 0
               for item in todo:
                   item_len = len(item[1]) + 12
-                  if cur_batch and cur_len + item_len > 3500:
-                      batches.append(cur_batch)
-                      cur_batch, cur_len = [], 0
-                  cur_batch.append(item)
-                  cur_len += item_len
-              if cur_batch:
-                  batches.append(cur_batch)
-
-              def run_batch(batch):
-                  joined = "\n|||SEP|||\n".join(x[1] for x in batch)
-                  for attempt in range(2):
-                      try:
-                          tr = GoogleTranslator(source="en", target="th").translate(joined)
-                          if tr:
-                              parts = re.split(r"\s*\|\|\|\s*SEP\s*\|\|\|\s*", tr)
-                              if len(parts) == len(batch):
-                                  out = []
-                                  for (orig_idx, _, tags), p in zip(batch, parts):
-                                      p = re.sub(r"\s*__NL__\s*", "\n", p, flags=re.IGNORECASE)
-                                      for t_i, orig_tag in enumerate(tags):
-                                          p = re.sub(rf"\s*__T{t_i}__\s*", orig_tag, p, flags=re.IGNORECASE)
-                                      out.append((orig_idx, p.strip()))
-                                  return out
-                      except Exception:
-                          time.sleep(0.5)
-                  return []
-
-              with ThreadPoolExecutor(max_workers=6) as ex:
-                  for batch_res in ex.map(run_batch, batches):
-                      for orig_idx, th_text in batch_res:
-                          if th_text:
-                              results[orig_idx] = th_text
-              return results
-          EOF
-
-          THAI_TTF="/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf"
-          [ ! -f "$THAI_TTF" ] && THAI_TTF=$(find /usr/share/fonts -iname "*Thai*.ttf" | head -n 1)
-
-          if [ "$MODE" = "export" ]; then
-            python3 -u - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/out" "$RUNNER_TEMP/gf_tools.py" "$THAI_TTF" << 'EOF'
-          import os, sys, json, importlib.util
-          sys.path.insert(0, os.path.abspath("dm/tools"))
-          import romfs
-
-          spec = importlib.util.spec_from_file_location("gf_tools", sys.argv[3])
-          gf = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(gf)
-
-          img_path, out_dir, thai_ttf = sys.argv[1], sys.argv[2], sys.argv[4]
-          img = romfs.Image(img_path)
-          os.makedirs(os.path.join(out_dir, "json_text"), exist_ok=True)
-          os.makedirs(os.path.join(out_dir, "thai_fonts"), exist_ok=True)
-
-          with open(img_path, "rb") as raw_f:
-              stack = [(0, "")]
-              dat_ok, font_ok = 0, 0
-              while stack:
-                  k, rel_path = stack.pop()
-                  a, b, _, _, t, _ = img.entry(k)
-                  if t == 1:
-                      low = rel_path.lower()
-                      if low.endswith(".dat") and "bin/message/english/" in low:
-                          raw_f.seek(a)
-                          parsed = gf.parse_gf_dat(raw_f.read(b))
-                          if parsed is not None:
-                              jpath = os.path.join(out_dir, "json_text", rel_path + ".json")
-                              os.makedirs(os.path.dirname(jpath), exist_ok=True)
-                              with open(jpath, "w", encoding="utf-8") as jf:
-                                  json.dump([{"id": i, "en": txt, "th": ""} for i, txt in enumerate(parsed)], jf, ensure_ascii=False, indent=2)
-                              dat_ok += 1
-                      elif low.endswith(".bfotf") and "bin/font/" in low and "or_font" not in low:
-                          raw_f.seek(a)
-                          patched = gf.patch_bfotf_with_thai(raw_f.read(b), thai_ttf)
-                          if patched:
-                              fpath = os.path.join(out_dir, "thai_fonts", rel_path)
-                              os.makedirs(os.path.dirname(fpath), exist_ok=True)
-                              with open(fpath, "wb") as ff:
-                                  ff.write(patched)
-                              font_ok += 1
-                  else:
-                      for child_name, child_idx in img.children(k):
-                          stack.append((child_idx, f"{rel_path}/{child_name}" if rel_path else child_name))
-
-          print(f"Exported {dat_ok} JSON text files and patched {font_ok} Thai BFOTF fonts!", flush=True)
-          EOF
-
-          elif [ "$MODE" = "build" ] || [ "$MODE" = "translate_all" ]; then
-            if [ -n "$MOD_ZIP_URL" ]; then
-              download_file "$MOD_ZIP_URL" "$RUNNER_TEMP/raw/mod_in.zip"
-              7z x "$RUNNER_TEMP/raw/mod_in.zip" -o"$RUNNER_TEMP/mod_in" -y >/dev/null
-            fi
-
-            python3 -u - "$RUNNER_TEMP/raw/RomFS.img" "$RUNNER_TEMP/mod_in" "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/gf_tools.py" "$THAI_TTF" "$MODE" << 'EOF'
-          import os, sys, json, importlib.util
-          sys.path.insert(0, os.path.abspath("dm/tools"))
-          import romfs
-
-          spec = importlib.util.spec_from_file_location("gf_tools", sys.argv[4])
-          gf = importlib.util.module_from_spec(spec)
-          spec.loader.exec_module(gf)
-
-          img_path, mod_dir, tree_dir, thai_ttf, mode = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[5], sys.argv[6]
-          img = romfs.Image(img_path)
-
-          translated_by_path = {}
-          translated_by_name = {}
-          for r, _, fs in os.walk(mod_dir):
-              if "__MACOSX" in r:
-                  continue
-              for fn in fs:
-                  if fn.startswith("._"):
-                      continue
-                  if fn.endswith(".dat.json") or fn.endswith(".json"):
-                      full_p = os.path.join(r, fn)
-                      norm = full_p.replace("\\", "/")
-                      base_dat = fn[:-5] if fn.endswith(".dat.json") else (fn[:-5] + ".dat")
-                      translated_by_name[base_dat.lower()] = full_p
-                      idx = norm.lower().find("bin/message/")
-                      if idx != -1:
-                          rel_dat = norm[idx:-5] if norm.endswith(".dat.json") else (norm[idx:-5] + ".dat")
-                          translated_by_path[rel_dat.lower()] = full_p
-
-          print(f"Mode={mode} | Loaded {len(translated_by_name)} custom JSON file(s)", flush=True)
-
-          patched_texts = 0
-          patched_fonts = 0
-          with open(img_path, "rb") as raw_f:
-              stack = [(0, "")]
-              while stack:
-                  k, rel_path = stack.pop()
-                  a, b, _, _, t, _ = img.entry(k)
-                  dest = os.path.join(tree_dir, rel_path) if rel_path else tree_dir
-                  if t == 1:
-                      os.makedirs(os.path.dirname(dest), exist_ok=True)
-                      low = rel_path.lower()
-                      fname = os.path.basename(low)
-                      is_eng = low.endswith(".dat") and "bin/message/english/" in low
-                      json_file = None
-                      if is_eng:
-                          json_file = translated_by_path.get(low) or translated_by_name.get(fname)
-
-                      if json_file:
-                          with open(json_file, "r", encoding="utf-8") as jf:
-                              items = json.load(jf)
-                          final_strings = [(it["th"] if it.get("th", "").strip() else it["en"]) for it in items]
-                          new_dat = gf.build_gf_dat(final_strings)
-                          with open(dest, "wb") as out_f:
-                              out_f.write(new_dat)
-                          patched_texts += 1
-                      elif mode == "translate_all" and is_eng:
-                          raw_f.seek(a)
-                          orig_b = raw_f.read(b)
-                          parsed = gf.parse_gf_dat(orig_b)
-                          if parsed is not None:
-                              th_strings = gf.auto_translate_strings(parsed)
-                              new_dat = gf.build_gf_dat(th_strings)
-                              with open(dest, "wb") as out_f:
-                                  out_f.write(new_dat)
-                              patched_texts += 1
-                              if patched_texts % 25 == 0:
-                                  print(f"Auto-translated {patched_texts} files...", flush=True)
-                          else:
-                              with open(dest, "wb") as out_f:
-                                  out_f.write(orig_b)
-                      elif low.endswith(".bfotf") and "bin/font/" in low and "or_font" not in low:
-                          raw_f.seek(a)
-                          orig_b = raw_f.read(b)
-                          patched = gf.patch_bfotf_with_thai(orig_b, thai_ttf)
-                          with open(dest, "wb") as out_f:
-                              out_f.write(patched if patched else orig_b)
-                          if patched:
-                              patched_fonts += 1
-                              print(f"Injected Thai font into: {rel_path}", flush=True)
-                      else:
-                          raw_f.seek(a)
-                          with open(dest, "wb") as out_f:
-                              rem = b
-                              while rem > 0:
-                                  chunk = raw_f.read(min(rem, 8 * 1024 * 1024))
-                                  if not chunk:
-                                      break
-                                  out_f.write(chunk)
-                                  rem -= len(chunk)
-                  else:
-                      os.makedirs(dest, exist_ok=True)
-                      for child_name, child_idx in img.children(k):
-                          stack.append((child_idx, f"{rel_path}/{child_name}" if rel_path else child_name))
-
-          print(f"Summary: Injected {patched_texts} Thai text file(s) & {patched_fonts} Thai font(s).", flush=True)
-          EOF
-
-            python3 -u dm/tools/romfs_image.py "$RUNNER_TEMP/romfs_tree" "$RUNNER_TEMP/out/RomFS.img"
-            ls -lh "$RUNNER_TEMP/out/RomFS.img"
-          fi
-
-      - name: Upload Thai Translation Kit
-        if: inputs.mode == 'export'
-        uses: actions/upload-artifact@v4
-        with:
-          name: thai-translation-kit
-          path: ${{ runner.temp }}/out/
-
-      - name: Upload Built Thai RomFS.img
-        if: inputs.mode == 'build' || inputs.mode == 'translate_all'
-        uses: actions/upload-artifact@v4
-        with:
-          name: thai-romfs-image
-          path: ${{ runner.temp }}/out/RomFS.img
+                  if cur_batch and cur_len + item_len > 350
