@@ -52,4 +52,59 @@ jobs:
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/raw" "$RUNNER_TEMP/out" "$RUNNER_TEMP/mod_in" "$RUNNER_TEMP/romfs_tree"
-          echo "aW1wb3J0IG9zLCBzeXMsIGpzb24sIHJlLCB0aW1lLCBzdHJ1Y3QsIHN1YnByb2Nlc3MKZnJvbSBjb25jdXJyZW50LmZ1dHVyZXMgaW1wb3J0IFRocmVhZFBvb2xFeGVjdXRvcgpmcm9tIGZvbnRUb29scy50dExpYiBpbXBvcnQgVFRGb250CmZyb20gZm9udFRvb2xzLm1lcmdlIGltcG9ydCBNZXJnZXIKCnN5cy5wYXRoLmluc2VydCgwLCBvcy5wYXRoLmFic3BhdGgoImRtL3Rvb2xzIikpCmltcG9ydCByb21mcwoKdGVtcF9kaXIgPSBvcy5lbnZpcm9uWyJSVU5ORVJfVEVNUCJdCm1vZGUgPSBvcy5lbnZpcm9uWyJNT0RFIl0Kcm9tZnNfdXJsID0gb3MuZW52aXJvblsiUk9NRlNfVVJMIl0KbW9kX3ppcF91cmwgPSBvcy5lbnZpcm9uLmdldCgiTU9EX1pJUF9VUkwiLCAiIikuc3RyaXAoKQoKZGVmIGRvd25sb2FkX2ZpbGUodXJsLCBvdXRfcGF0aCk6CiAgICBpZiAiZ29maWxlLmlvL2QvIiBpbiB1cmwubG93ZXIoKToKICAgICAgICBmcm9tIHBsYXl3cmlnaHQuc3luY19hcGkgaW1wb3J0IHN5bmNfcGxheXdyaWdodAogICAgICAgIHdpdGggc3luY19wbGF5d3JpZ2h0KCkgYXMgcDoKICAgICAgICAgICAgYnJvd3NlciA9IHAuY2hyb21pdW0ubGF1bmNoKGhlYWRsZXNzPVRydWUpCiAgICAgICAgICAgIGNvbnRleHQgPSBicm93c2VyLm5ld19jb250ZXh0KGFjY2VwdF9kb3dubG9hZHM9VHJ1ZSkKICAgICAgICAgICAgcGFnZSA9IGNvbnRleHQubmV3X3BhZ2UoKQogICAgICAgICAgICBwYWdlLmdvdG8odXJsLCB3YWl0X3VudGlsPSJuZXR3b3JraWRsZSIsIHRpbWVvdXQ9OTAwMDApCiAgICAgICAgICAgIHBhZ2Uud2FpdF9mb3Jfc2VsZWN0b3IoImJ1dHRvbjpoYXMtdGV4dCgnRG93bmxvYWQnKSwgYTpoYXMtdGV4dCgnRG93bmxvYWQnKSIsIHRpbWVvdXQ9NDUwMDApCiAgICAgICAgICAgIHRpbWUuc2xlZXAoMikKICAgICAgICAgICAgd2l0aCBwYWdlLmV4cGVjdF9kb3dubG9hZCh0aW1lb3V0PTApIGFzIGRsX2luZm86CiAgICAgICAgICAgICAgICBwYWdlLmxvY2F0b3IoImJ1dHRvbjpoYXMtdGV4dCgnRG93bmxvYWQnKSwgYTpoYXMtdGV4dCgnRG93bmxvYWQnKSIpLmZpcnN0LmNsaWNrKCkKICAgICAgICAgICAgZGwgPSBkbF9pbmZvLnZhbHVlCiAgICAgICAgICAgIHByaW50KGYiRG93bmxvYWRpbmcge2RsLnN1Z2dlc3RlZF9maWxlbmFtZX0uLi4iLCBmbHVzaD1UcnVlKQogICAgICAgICAgICBkbC5zYXZlX2FzKG91dF9wYXRoKQogICAgICAgICAgICBicm93c2VyLmNsb3NlKCkKICAgIGVsaWYgImRyaXZlLmdvb2dsZS5jb20iIGluIHVybC5sb3dlcigpIG9yICJkb2NzLmdvb2dsZS5jb20iIGluIHVybC5sb3dlcigpOgogICAgICAgIHN1YnByb2Nlc3MucnVuKFsiZ2Rvd24iLCB1cmwsICItTyIsIG91dF9wYXRoXSwgY2hlY2s9VHJ1ZSkKICAgIGVsc2U6CiAgICAgICAgc3VicHJvY2Vzcy5ydW4oWyJjdXJsIiwgIi1mTCIsICItLXJldHJ5IiwgIjMiLCAiLW8iLCBvdXRfcGF0aCwgdXJsXSwgY2hlY2s9VHJ1ZSkKCnJhd19yb21mcyA9IG9zLnBhdGguam9pbih0ZW1wX2RpciwgInJhdyIsICJSb21GUy5pbWciKQpkb3dubG9hZF9maWxlKHJvbWZzX3VybCwgcmF3X3JvbWZzKQpwcmludCgiRG93bmxvYWQgZmluaXNoZWQuIFN0YXJ0aW5nIHByb2Nlc3NpbmcuLi4iLCBmbHVzaD1UcnVlKQoKZGVmIGNyeXB0X2dmX3RleHQoZGF0YV9ieXRlcywgZW50cnlfaWR4KToKICAgIGtleSA9ICgweDdDODkgKyBlbnRyeV9pZHggKiAweDI5ODMpICYgMHhGRkZGCiAgICBvdXQgPSBieXRlYXJyYXkobGVuKGRhdGFfYnl0ZXMpKQogICAgZm9yIGkgaW4gcmFuZ2UoMCwgbGVuKGRhdGFfYnl0ZXMpIC0gMSwgMik6CiAgICAgICAgdmFsID0gc3RydWN0LnVucGFja19mcm9tKCI8SCIsIGRhdGFfYnl0ZXMsIGkpWzBdIF4ga2V5CiAgICAgICAgc3RydWN0LnBhY2tfaW50bygiPEgiLCBvdXQsIGksIHZhbCkKICAgICAgICBrZXkgPS
+          python3 -u -c '
+          import os, sys, json, re, time, struct, subprocess
+          from concurrent.futures import ThreadPoolExecutor
+          from fontTools.ttLib import TTFont
+          from fontTools.merge import Merger
+
+          sys.path.insert(0, os.path.abspath("dm/tools"))
+          import romfs
+
+          temp_dir = os.environ["RUNNER_TEMP"]
+          mode = os.environ["MODE"]
+          romfs_url = os.environ["ROMFS_URL"]
+          mod_zip_url = os.environ.get("MOD_ZIP_URL", "").strip()
+
+          def download_file(url, out_path):
+              if "gofile.io/d/" in url.lower():
+                  from playwright.sync_api import sync_playwright
+                  with sync_playwright() as p:
+                      browser = p.chromium.launch(headless=True)
+                      context = browser.new_context(accept_downloads=True)
+                      page = context.new_page()
+                      page.goto(url, wait_until="networkidle", timeout=90000)
+                      page.wait_for_selector("button:has-text(\"Download\"), a:has-text(\"Download\")", timeout=45000)
+                      time.sleep(2)
+                      with page.expect_download(timeout=0) as dl_info:
+                          page.locator("button:has-text(\"Download\"), a:has-text(\"Download\")").first.click()
+                      dl = dl_info.value
+                      print(f"Downloading {dl.suggested_filename}...", flush=True)
+                      dl.save_as(out_path)
+                      browser.close()
+              elif "drive.google.com" in url.lower() or "docs.google.com" in url.lower():
+                  subprocess.run(["gdown", url, "-O", out_path], check=True)
+              else:
+                  subprocess.run(["curl", "-fL", "--retry", "3", "-o", out_path, url], check=True)
+
+          raw_romfs = os.path.join(temp_dir, "raw", "RomFS.img")
+          download_file(romfs_url, raw_romfs)
+          print("Download finished. Starting processing...", flush=True)
+
+          def crypt_gf_text(data_bytes, entry_idx):
+              key = (0x7C89 + entry_idx * 0x2983) & 0xFFFF
+              out = bytearray(len(data_bytes))
+              for i in range(0, len(data_bytes) - 1, 2):
+                  val = struct.unpack_from("<H", data_bytes, i)[0] ^ key
+                  struct.pack_into("<H", out, i, val)
+                  key = ((key << 3) | (key >> 13)) & 0xFFFF
+              return bytes(out)
+
+          def parse_gf_dat(dat_bytes):
+              if len(dat_bytes) < 16:
+                  return None
+              sec_count, entry_count, total_size, initial_key, sec_offset = struct.unpack_from("<HHIII", dat_bytes, 0)
+              if sec_count != 1 or sec_offset != 0x10 or total_size > len(dat_bytes):
+                  return None
+              entries = []
+              for i in range
