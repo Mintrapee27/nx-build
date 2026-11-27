@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       mod_zip_url:
-        description: 'For [build] mode: Gofile/Drive link to translated zip (optional if testing Thai font only)'
+        description: 'For [build] mode: Gofile/Drive link to translated zip'
         required: false
         default: ''
         type: string
@@ -178,15 +178,12 @@ jobs:
               header = struct.pack("<HHIII", 1, len(encoded_entries), cur_off, 0, 0x10)
               return bytes(header + table + body)
 
-          # ถอดรหัส BFOTF (รองรับทั้งไฟล์ OTF ตรง และไฟล์ที่เข้ารหัส XOR ของ Nintendo Switch)
           def decode_bfotf(bfotf_bytes):
-              # 1. แบบมีหัว OTTO หรือ TTF ตรงๆ
               for sig in (b"OTTO", b"\x00\x01\x00\x00"):
                   idx = bfotf_bytes.find(sig)
                   if idx != -1 and idx < 256:
                       return bfotf_bytes[:idx], bfotf_bytes[idx:], None
 
-              # 2. แบบเข้ารหัส XOR 32-bit key (คำนวณคีย์จาก 4 ไบต์แรกเทียบกับ 'OTTO')
               if len(bfotf_bytes) > 16:
                   target = b"OTTO"
                   key = bytes([bfotf_bytes[i] ^ target[i] for i in range(4)])
@@ -301,22 +298,27 @@ jobs:
           img_path, mod_dir, tree_dir, thai_ttf = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[5]
           img = romfs.Image(img_path)
 
-          # ค้นหาไฟล์ .json ที่แปลแล้วทั้งหมดใน mod_dir
-          translated_map = {}
+          # รองรับทั้งกรณี zip มาทั้งโครงสร้างโฟลเดอร์ และกรณี zip มาเฉพาะไฟล์ *.dat.json หรือ *.json
+          translated_by_path = {}
+          translated_by_name = {}
           for r, _, fs in os.walk(mod_dir):
+              if "__MACOSX" in r:
+                  continue
               for fn in fs:
-                  if fn.endswith(".dat.json"):
+                  if fn.startswith("._"):
+                      continue
+                  if fn.endswith(".dat.json") or fn.endswith(".json"):
                       full_p = os.path.join(r, fn)
-                      # หา relative path ตั้งแต่ bin/...
                       norm = full_p.replace("\\", "/")
-                      idx = norm.find("bin/message/")
+                      base_dat = fn[:-5] if fn.endswith(".dat.json") else (fn[:-5] + ".dat")
+                      translated_by_name[base_dat.lower()] = full_p
+                      idx = norm.lower().find("bin/message/")
                       if idx != -1:
-                          rel_dat = norm[idx:-5] # ตัด .json ออก เหลือ bin/message/.../*.dat
-                          translated_map[rel_dat.lower()] = full_p
+                          rel_dat = norm[idx:-5] if norm.endswith(".dat.json") else (norm[idx:-5] + ".dat")
+                          translated_by_path[rel_dat.lower()] = full_p
 
-          print(f"Found {len(translated_map)} translated JSON files to inject.")
+          print(f"Loaded {len(translated_by_name)} translated JSON file(s): {list(translated_by_name.keys())}")
 
-          # แตก RomFS.img ออกมาเป็นโฟลเดอร์ชั่วคราว พร้อมแทนที่ฟอนต์ไทยและข้อความที่แปลแล้ว
           patched_texts = 0
           patched_fonts = 0
           with open(img_path, "rb") as raw_f:
@@ -328,14 +330,20 @@ jobs:
                   if t == 1:
                       os.makedirs(os.path.dirname(dest), exist_ok=True)
                       low = rel_path.lower()
-                      if low in translated_map:
-                          with open(translated_map[low], "r", encoding="utf-8") as jf:
+                      fname = os.path.basename(low)
+                      json_file = None
+                      if "message/english/" in low:
+                          json_file = translated_by_path.get(low) or translated_by_name.get(fname)
+
+                      if json_file:
+                          with open(json_file, "r", encoding="utf-8") as jf:
                               items = json.load(jf)
                           final_strings = [(it["th"] if it.get("th", "").strip() else it["en"]) for it in items]
                           new_dat = gf.build_gf_dat(final_strings)
                           with open(dest, "wb") as out_f:
                               out_f.write(new_dat)
                           patched_texts += 1
+                          print(f"Injected Thai text into: {rel_path}")
                       elif low.endswith(".bfotf") and "bin/font/" in low and "or_font" not in low:
                           raw_f.seek(a)
                           orig_b = raw_f.read(b)
@@ -344,6 +352,7 @@ jobs:
                               out_f.write(patched if patched else orig_b)
                           if patched:
                               patched_fonts += 1
+                              print(f"Injected Thai font into: {rel_path}")
                       else:
                           raw_f.seek(a)
                           with open(dest, "wb") as out_f:
@@ -359,7 +368,7 @@ jobs:
                       for child_name, child_idx in img.children(k):
                           stack.append((child_idx, f"{rel_path}/{child_name}" if rel_path else child_name))
 
-          print(f"Summary: Injected {patched_texts} Thai text files & {patched_fonts} Thai fonts.")
+          print(f"Summary: Injected {patched_texts} Thai text file(s) & {patched_fonts} Thai font(s).")
           EOF
 
             # แพ็กกลับเป็น RomFS.img (DMROMFS1) ด้วยสคริปต์ของโปรเจกต์โดยตรง
