@@ -262,35 +262,34 @@ jobs:
             EXTRA_ARGS+=(--program "$PROGRAM_INDEX")
           fi
 
-          # Bypass 30GB disk space check and auto-delete source .nup once RomFS extraction completes
+          # Bypass 30GB guard & reclaim disk space from .nup blocks on-the-fly using macOS F_PUNCHHOLE
           python3 -c '
-          import sys, shutil, runpy, os, threading, time, glob
+          import sys, shutil, runpy, os, fcntl, struct, pathlib
           from collections import namedtuple
 
           Usage = namedtuple("usage", "total used free")
           shutil.disk_usage = lambda path: Usage(200 * 1024**3, 10 * 1024**3, 190 * 1024**3)
 
-          work_dir = sys.argv[sys.argv.index("--work-dir") + 1]
-          game_dir = os.path.dirname(sys.argv[1]) if os.path.isfile(sys.argv[1]) else sys.argv[1]
+          # Patch scripts/pack_nup.py to punch holes in base.nup as chunks are copied to RomFS.img
+          pack_nup_path = pathlib.Path("scripts/pack_nup.py")
+          if pack_nup_path.exists():
+              code = pack_nup_path.read_text()
+              old_line = "for p in range(eoff, eoff + esz, 8 << 20): put(view[p:min(p + (8 << 20), eoff + esz)])"
+              new_code = """for p in range(eoff, eoff + esz, 8 << 20):
+                      end_p = min(p + (8 << 20), eoff + esz)
+                      put(view[p:end_p])
+                      try:
+                          import fcntl, struct
+                          a_start = (p + 16777215) & ~16777215
+                          a_end = end_p & ~16777215
+                          if a_end > a_start and hasattr(n, "f"):
+                              fcntl.fcntl(n.f.fileno(), 99, struct.pack("IIqq", 0, 0, a_start, a_end - a_start))
+                      except Exception:
+                          pass"""
+              if old_line in code:
+                  pack_nup_path.write_text(code.replace(old_line, new_code))
+                  print("[PATCH] Enabled on-the-fly F_PUNCHHOLE disk reclamation in pack_nup.py")
 
-          def cleanup_source_when_extracted():
-              while True:
-                  time.sleep(5)
-                  romfs_files = glob.glob(os.path.join(work_dir, "extract", "*", "RomFS.img"))
-                  if romfs_files:
-                      s1 = os.path.getsize(romfs_files[0])
-                      time.sleep(3)
-                      s2 = os.path.getsize(romfs_files[0])
-                      if s1 > 1024 * 1024 * 1024 and s1 == s2:
-                          for f in glob.glob(os.path.join(game_dir, "*")):
-                              try:
-                                  os.remove(f)
-                                  print(f"[AUTO-CLEAN] Deleted source file {f} to free disk space.")
-                              except Exception:
-                                  pass
-                          break
-
-          threading.Thread(target=cleanup_source_when_extracted, daemon=True).start()
           sys.argv[0] = "scripts/build_ipa_from_nsp.py"
           runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
           ' "$TARGET_INPUT" \
