@@ -38,7 +38,7 @@ jobs:
   build-ipa:
     name: Build Unsigned IPA
     runs-on: xcode-27
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - name: Free up maximum disk space
         run: |
@@ -148,7 +148,7 @@ jobs:
             sig6=$(head -c 6 "$src" | xxd -p | tr -d '\n')
             sig4="${sig6:0:8}"
 
-            if [ "$sig6" = "377abcaf271c" ] || [ "$sig4" = "504b0304" ] || [ "$sig4" = "504b0506" ] || [ "$sig4" = "504b0708" ]; then
+            if [ "$sig6" = "377abcaf271c" ] \vert{}\vert{} [ "$sig4" = "504b0304" ] || [ "$sig4" = "504b0506" ] \vert{}\vert{} [ "$sig4" = "504b0708" ]; then
               7z x "$src" -o"$out_dir" -y
               rm -f "$src"
             elif [ "$sig6" = "526172211a07" ]; then
@@ -156,7 +156,7 @@ jobs:
               rm -f "$src"
             else
               xci_magic=$(dd if="$src" bs=1 skip=256 count=4 2>/dev/null || true)
-              if [ "$sig4" = "4e555030" ] || [ "$sig4" = "4e555000" ] || [ "${sig6:0:6}" = "4e5550" ]; then
+              if [ "$sig4" = "4e555030" ] || [ "$sig4" = "4e555000" ] \vert{}\vert{} [ "${sig6:0:6}" = "4e5550" ]; then
                 mv "$src" "$out_dir/${fallback_name}.nup"
               elif head -c 65536 "$src" | grep -qa "\.ncz"; then
                 if [ "$xci_magic" = "HEAD" ]; then
@@ -223,193 +223,4 @@ jobs:
         run: |
           set -e
           TOTAL_BYTES=$(find "$RUNNER_TEMP/game" -type f -exec stat -f%z {} + | awk '{s+=$1} END {print s+0}')
-          LIMIT_BYTES=$((4 * 1024 * 1024 * 1024))
-
-          if [ "$TOTAL_BYTES" -gt "$LIMIT_BYTES" ]; then
-            echo "ขนาดไฟล์เกมเกิน 4GB ($TOTAL_BYTES bytes) -> ใช้โหมดแยก RomFS.img อัตโนมัติ"
-            ROMFS_MODE="separate"
-            KEEP_FLAG="--keep-extracted"
-          else
-            echo "ขนาดไฟล์เกมไม่เกิน 4GB ($TOTAL_BYTES bytes) -> รวมใน IPA ไฟล์เดียว (bundle)"
-            ROMFS_MODE="bundle"
-            KEEP_FLAG="--no-keep-extracted"
-          fi
-
-          TARGET_INPUT="$RUNNER_TEMP/game"
-          NUP_FILE=$(find "$RUNNER_TEMP/game" -maxdepth 1 -type f -iname "*.nup" | head -n 1)
-          DUMP_EXEFS=$(find "$RUNNER_TEMP/game" -type d -iname "exefs" | head -n 1)
-
-          if [ -n "$NUP_FILE" ]; then
-            echo "Detected Switch 2 NUP container: $NUP_FILE"
-            TARGET_INPUT="$NUP_FILE"
-          elif [ -n "$DUMP_EXEFS" ]; then
-            PARENT_DIR=$(dirname "$DUMP_EXEFS")
-            if [ "$(basename "$PARENT_DIR" | tr '[:upper:]' '[:lower:]')" = "base" ]; then
-              TARGET_INPUT=$(dirname "$PARENT_DIR")
-            else
-              TARGET_INPUT="$PARENT_DIR"
-            fi
-            echo "Detected extracted dump folder: $TARGET_INPUT"
-          fi
-
-          EXTRA_ARGS=()
-          if [ -f "$RUNNER_TEMP/keys/prod.keys" ]; then
-            EXTRA_ARGS+=(-k "$RUNNER_TEMP/keys/prod.keys")
-          fi
-          if [ -f "$RUNNER_TEMP/icon/custom_icon" ]; then
-            EXTRA_ARGS+=(--icon "$RUNNER_TEMP/icon/custom_icon")
-          fi
-          if [ -n "$PROGRAM_INDEX" ] && [ "$PROGRAM_INDEX" != "auto" ]; then
-            EXTRA_ARGS+=(--program "$PROGRAM_INDEX")
-          fi
-
-          python3 -c '
-          import sys, shutil, runpy, os, fcntl, struct, pathlib, re, builtins
-          from collections import namedtuple, Counter
-
-          Usage = namedtuple("usage", "total used free")
-          shutil.disk_usage = lambda path: Usage(200 * 1024**3, 10 * 1024**3, 190 * 1024**3)
-
-          sys.path.insert(0, "dm/tools")
-          import romfs_image
-
-          offset_counts = Counter()
-          def extract_ints(obj, out, depth=0):
-              if depth > 3:
-                  return
-              if isinstance(obj, int) and not isinstance(obj, bool):
-                  if obj >= 4096:
-                      out.append(obj)
-              elif isinstance(obj, (tuple, list)):
-                  for x in obj:
-                      extract_ints(x, out, depth + 1)
-              elif isinstance(obj, dict):
-                  for x in obj.values():
-                      extract_ints(x, out, depth + 1)
-              elif hasattr(obj, "__dict__"):
-                  for x in obj.__dict__.values():
-                      extract_ints(x, out, depth + 1)
-              elif hasattr(obj, "__slots__"):
-                  for s in obj.__slots__:
-                      if hasattr(obj, s):
-                          extract_ints(getattr(obj, s), out, depth + 1)
-
-          orig_write = romfs_image.write
-          def hooked_write(ents, dst, copy):
-              offset_counts.clear()
-              for e in ents:
-                  nums = []
-                  extract_ints(e[1], nums)
-                  for v in set(nums):
-                      offset_counts[v] += 1
-              print(f"[PUNCH-INIT] Indexed {len(offset_counts)} offsets from {len(ents)} entries (skipping deduplicated blobs)")
-              return orig_write(ents, dst, copy)
-          romfs_image.write = hooked_write
-
-          nup_path = sys.argv[1]
-          rw_fd = os.open(nup_path, os.O_RDWR) if os.path.isfile(nup_path) else None
-
-          intervals = []
-          bytes_since_flush = 0
-          total_reclaimed = 0
-          F_PUNCHHOLE = 99
-          ALIGN = 16384
-
-          def flush_holes():
-              global intervals, bytes_since_flush, total_reclaimed
-              if not rw_fd or not intervals:
-                  return
-              intervals.sort()
-              merged = []
-              for s, e in intervals:
-                  if merged and s <= merged[-1][1]:
-                      merged[-1] = (merged[-1][0], max(merged[-1][1], e))
-                  else:
-                      merged.append((s, e))
-              kept = []
-              for s, e in merged:
-                  a_s = (s + ALIGN - 1) & ~(ALIGN - 1)
-                  a_e = e & ~(ALIGN - 1)
-                  if a_e > a_s:
-                      try:
-                          fcntl.fcntl(rw_fd, F_PUNCHHOLE, struct.pack("IIqq", 0, 0, a_s, a_e - a_s))
-                          total_reclaimed += (a_e - a_s)
-                      except Exception as ex:
-                          print(f"[PUNCH-WARN] {ex}")
-                      if a_s > s:
-                          kept.append((s, a_s))
-                      if e > a_e:
-                          kept.append((a_e, e))
-                  else:
-                      kept.append((s, e))
-              intervals = kept
-              bytes_since_flush = 0
-              if total_reclaimed > 0 and total_reclaimed % (2 * 1024**3) < 128 * 1024**2:
-                  print(f"[PUNCH-OK] Reclaimed {total_reclaimed / (1024**3):.2f} GB from base.nup")
-
-          def punch_nup(eoff, a, b):
-              global bytes_since_flush
-              if offset_counts.get(eoff, 0) != 1:
-                  return
-              intervals.append((a, b))
-              bytes_since_flush += (b - a)
-              if bytes_since_flush >= 128 * 1024 * 1024:
-                  flush_holes()
-
-          builtins._punch_nup = punch_nup
-
-          pack_nup_path = pathlib.Path("scripts/pack_nup.py")
-          if pack_nup_path.exists():
-              code = pack_nup_path.read_text()
-              def repl(m):
-                  ind = m.group(1)
-                  return (
-                      f"{ind}for p in range(eoff, eoff + esz, 8 << 20):\n"
-                      f"{ind}    end_p = min(p + (8 << 20), eoff + esz)\n"
-                      f"{ind}    put(view[p:end_p])\n"
-                      f"{ind}    _punch_nup(eoff, p, end_p)"
-                  )
-              new_code, count = re.subn(
-                  r"^([ \t]*)for p in range\(eoff, eoff \+ esz, 8 << 20\): put\(view\[p:min\(p \+ \(8 << 20\), eoff \+ esz\)\]\)",
-                  repl,
-                  code,
-                  flags=re.MULTILINE
-              )
-              if count:
-                  pack_nup_path.write_text(new_code)
-                  print(f"[PATCH] Enabled dedup-safe F_PUNCHHOLE (99) in pack_nup.py ({count} place)")
-
-          sys.argv[0] = "scripts/build_ipa_from_nsp.py"
-          runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
-          ' "$TARGET_INPUT" \
-            "${EXTRA_ARGS[@]}" \
-            -o "$RUNNER_TEMP/out/game.ipa" \
-            --work-dir "$RUNNER_TEMP/work" \
-            --romfs "$ROMFS_MODE" \
-            $KEEP_FLAG \
-            --progress lines
-
-          rm -rf "$RUNNER_TEMP/game"/* "$RUNNER_TEMP/raw"/*
-          df -h
-
-      - name: Upload RomFS.img to Gofile (if separate)
-        run: |
-          ROMFS_IMG=$(find "$RUNNER_TEMP/work/extract" -type f -name "RomFS.img" | head -n 1)
-          if [ -n "$ROMFS_IMG" ]; then
-            echo "Uploading RomFS.img ($(ls -lh "$ROMFS_IMG" | awk '{print $5}')) to Gofile..."
-            RESP=$(curl -fS --retry 3 -F "file=@$ROMFS_IMG" https://upload.gofile.io/uploadfile)
-            echo "$RESP"
-            LINK=$(echo "$RESP" | jq -r '.data.downloadPage // empty')
-            echo "=========================================="
-            echo "ROMFS DOWNLOAD LINK: $LINK"
-            echo "=========================================="
-          else
-            echo "No separate RomFS.img found (bundled inside IPA)."
-          fi
-
-      - name: Upload IPA to GitHub Artifacts
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: game-ipa
-          path: ${{ runner.temp }}/out/*.ipa
-          retention-days: 7
+          LIMIT_BYTES=$((4 * 1024 * 1024 * 1024
