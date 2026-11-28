@@ -86,10 +86,11 @@ jobs:
             local url="$1"
             local out="$2"
             if echo "$url" | grep -qiE "gofile\.io/d/"; then
-              eval "$(python3 -c '
-          import sys, shlex
+              eval "$(TARGET_GF_URL="$url" python3 - <<'EOF'
+          import os, sys, shlex
           from playwright.sync_api import sync_playwright
 
+          target_url = os.environ["TARGET_GF_URL"]
           with sync_playwright() as p:
               b = p.chromium.launch(headless=True)
               c = b.new_context()
@@ -104,15 +105,15 @@ jobs:
                       req_headers = req.headers
 
               page.on("request", on_request)
-              page.goto(sys.argv[1], wait_until="networkidle", timeout=90000)
-              page.wait_for_selector("button:has-text(\"Download\"), a:has-text(\"Download\")", timeout=45000)
+              page.goto(target_url, wait_until="networkidle", timeout=90000)
+              page.wait_for_selector('button:has-text("Download"), a:has-text("Download")', timeout=45000)
               page.wait_for_timeout(1500)
-              page.locator("button:has-text(\"Download\"), a:has-text(\"Download\")").first.click()
+              page.locator('button:has-text("Download"), a:has-text("Download")').first.click()
               for _ in range(40):
                   if direct_url:
                       break
                   page.wait_for_timeout(500)
-              cookies = "; ".join([f"{ck[\"name\"]}={ck[\"value\"]}" for ck in c.cookies()])
+              cookies = "; ".join([f"{ck['name']}={ck['value']}" for ck in c.cookies()])
               ua = req_headers.get("user-agent", "Mozilla/5.0")
               ref = req_headers.get("referer", "https://gofile.io/")
               b.close()
@@ -122,7 +123,8 @@ jobs:
               print(f"GF_COOKIE={shlex.quote(cookies)}")
               print(f"GF_UA={shlex.quote(ua)}")
               print(f"GF_REF={shlex.quote(ref)}")
-          ' "$url")"
+          EOF
+          )"
               curl -fL --retry 3 \
                 -H "Cookie: $GF_COOKIE" \
                 -H "User-Agent: $GF_UA" \
