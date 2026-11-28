@@ -262,33 +262,55 @@ jobs:
             EXTRA_ARGS+=(--program "$PROGRAM_INDEX")
           fi
 
-          # Bypass 30GB guard & reclaim disk space from .nup blocks on-the-fly using macOS F_PUNCHHOLE
           python3 -c '
-          import sys, shutil, runpy, os, fcntl, struct, pathlib
+          import sys, shutil, runpy, os, fcntl, struct, pathlib, mmap, re, builtins
           from collections import namedtuple
 
           Usage = namedtuple("usage", "total used free")
           shutil.disk_usage = lambda path: Usage(200 * 1024**3, 10 * 1024**3, 190 * 1024**3)
 
-          # Patch scripts/pack_nup.py to punch holes in base.nup as chunks are copied to RomFS.img
+          orig_mmap = mmap.mmap
+          nup_fds = set()
+          def hooked_mmap(fileno, length, *args, **kwargs):
+              try:
+                  if fileno > 2 and os.fstat(fileno).st_size > 1024**3:
+                      nup_fds.add(fileno)
+              except Exception:
+                  pass
+              return orig_mmap(fileno, length, *args, **kwargs)
+          mmap.mmap = hooked_mmap
+
+          def punch_nup(a, b):
+              a_start = (a + 16777215) & ~16777215
+              a_end = b & ~16777215
+              if a_end > a_start:
+                  for fd in list(nup_fds):
+                      try:
+                          fcntl.fcntl(fd, 99, struct.pack("IIqq", 0, 0, a_start, a_end - a_start))
+                      except Exception:
+                          pass
+          builtins._punch_nup = punch_nup
+
           pack_nup_path = pathlib.Path("scripts/pack_nup.py")
           if pack_nup_path.exists():
               code = pack_nup_path.read_text()
-              old_line = "for p in range(eoff, eoff + esz, 8 << 20): put(view[p:min(p + (8 << 20), eoff + esz)])"
-              new_code = """for p in range(eoff, eoff + esz, 8 << 20):
-                      end_p = min(p + (8 << 20), eoff + esz)
-                      put(view[p:end_p])
-                      try:
-                          import fcntl, struct
-                          a_start = (p + 16777215) & ~16777215
-                          a_end = end_p & ~16777215
-                          if a_end > a_start and hasattr(n, "f"):
-                              fcntl.fcntl(n.f.fileno(), 99, struct.pack("IIqq", 0, 0, a_start, a_end - a_start))
-                      except Exception:
-                          pass"""
-              if old_line in code:
-                  pack_nup_path.write_text(code.replace(old_line, new_code))
-                  print("[PATCH] Enabled on-the-fly F_PUNCHHOLE disk reclamation in pack_nup.py")
+              def repl(m):
+                  ind = m.group(1)
+                  return (
+                      f"{ind}for p in range(eoff, eoff + esz, 8 << 20):\n"
+                      f"{ind}    end_p = min(p + (8 << 20), eoff + esz)\n"
+                      f"{ind}    put(view[p:end_p])\n"
+                      f"{ind}    _punch_nup(p, end_p)"
+                  )
+              new_code, count = re.subn(
+                  r"^([ \t]*)for p in range\(eoff, eoff \+ esz, 8 << 20\): put\(view\[p:min\(p \+ \(8 << 20\), eoff \+ esz\)\]\)",
+                  repl,
+                  code,
+                  flags=re.MULTILINE
+              )
+              if count:
+                  pack_nup_path.write_text(new_code)
+                  print(f"[PATCH] Enabled F_PUNCHHOLE in pack_nup.py ({count} place)")
 
           sys.argv[0] = "scripts/build_ipa_from_nsp.py"
           runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
