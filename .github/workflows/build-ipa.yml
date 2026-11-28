@@ -91,18 +91,17 @@ jobs:
           from playwright.sync_api import sync_playwright
 
           target_url = os.environ["TARGET_GF_URL"]
+          state = {"direct_url": None, "headers": {}}
+
           with sync_playwright() as p:
               b = p.chromium.launch(headless=True)
               c = b.new_context()
               page = c.new_page()
-              direct_url = None
-              req_headers = {}
 
               def on_request(req):
-                  nonlocal direct_url, req_headers
                   if "gofile.io/download/" in req.url or ("store" in req.url and "gofile.io" in req.url and "/download/" in req.url):
-                      direct_url = req.url
-                      req_headers = req.headers
+                      state["direct_url"] = req.url
+                      state["headers"] = req.headers
 
               page.on("request", on_request)
               page.goto(target_url, wait_until="networkidle", timeout=90000)
@@ -110,16 +109,16 @@ jobs:
               page.wait_for_timeout(1500)
               page.locator('button:has-text("Download"), a:has-text("Download")').first.click()
               for _ in range(40):
-                  if direct_url:
+                  if state["direct_url"]:
                       break
                   page.wait_for_timeout(500)
               cookies = "; ".join([f"{ck['name']}={ck['value']}" for ck in c.cookies()])
-              ua = req_headers.get("user-agent", "Mozilla/5.0")
-              ref = req_headers.get("referer", "https://gofile.io/")
+              ua = state["headers"].get("user-agent", "Mozilla/5.0")
+              ref = state["headers"].get("referer", "https://gofile.io/")
               b.close()
-              if not direct_url:
+              if not state["direct_url"]:
                   sys.exit(1)
-              print(f"GF_URL={shlex.quote(direct_url)}")
+              print(f"GF_URL={shlex.quote(state['direct_url'])}")
               print(f"GF_COOKIE={shlex.quote(cookies)}")
               print(f"GF_UA={shlex.quote(ua)}")
               print(f"GF_REF={shlex.quote(ref)}")
