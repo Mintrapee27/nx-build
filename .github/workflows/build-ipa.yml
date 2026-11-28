@@ -44,13 +44,14 @@ jobs:
         run: |
           df -h
           xcrun simctl delete all || true
-          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
           sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/* || true
           sudo rm -rf /Users/runner/Library/Caches/* || true
           sudo rm -rf /Users/runner/Library/Developer/Xcode/Archives/* || true
           sudo rm -rf /Users/runner/Library/Developer/Xcode/DerivedData/* || true
           sudo rm -rf /usr/local/share/dotnet || true
           sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /Users/runner/Library/Android || true
           sudo rm -rf /Applications/Xcode_26*.app || true
           sudo rm -rf /Applications/Xcode_16*.app || true
           brew cleanup --prune=all || true
@@ -73,7 +74,7 @@ jobs:
         run: |
           python -m pip install lz4 "capstone>=5,<6" fonttools zbic gdown playwright
           python -m playwright install chromium
-          brew install xcodegen zstd glslang p7zip unar
+          brew install xcodegen zstd glslang p7zip unar jq
 
       - name: Download and extract game files
         env:
@@ -274,11 +275,12 @@ jobs:
 
           intervals = []
           bytes_since_flush = 0
-          F_PUNCHHOLE = 115  # macOS fcntl F_PUNCHHOLE
-          ALIGN = 16 * 1024 * 1024  # 16MB APFS hole alignment
+          total_reclaimed = 0
+          F_PUNCHHOLE = 99
+          ALIGN = 16384  # 16KB APFS page alignment on Apple Silicon
 
           def flush_holes():
-              global intervals, bytes_since_flush
+              global intervals, bytes_since_flush, total_reclaimed
               if not rw_fd or not intervals:
                   return
               intervals.sort()
@@ -295,6 +297,7 @@ jobs:
                   if a_e > a_s:
                       try:
                           fcntl.fcntl(rw_fd, F_PUNCHHOLE, struct.pack("IIqq", 0, 0, a_s, a_e - a_s))
+                          total_reclaimed += (a_e - a_s)
                       except Exception as ex:
                           print(f"[PUNCH-WARN] {ex}")
                       if a_s > s:
@@ -305,6 +308,8 @@ jobs:
                       kept.append((s, e))
               intervals = kept
               bytes_since_flush = 0
+              if total_reclaimed > 0 and total_reclaimed % (2 * 1024**3) < 128 * 1024**2:
+                  print(f"[PUNCH-OK] Reclaimed {total_reclaimed / (1024**3):.2f} GB from base.nup")
 
           def punch_nup(a, b):
               global bytes_since_flush
@@ -334,7 +339,7 @@ jobs:
               )
               if count:
                   pack_nup_path.write_text(new_code)
-                  print(f"[PATCH] Enabled macOS F_PUNCHHOLE (115) + interval merge in pack_nup.py ({count} place)")
+                  print(f"[PATCH] Enabled macOS F_PUNCHHOLE (99) + 16KB align in pack_nup.py ({count} place)")
 
           sys.argv[0] = "scripts/build_ipa_from_nsp.py"
           runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
@@ -349,12 +354,24 @@ jobs:
           rm -rf "$RUNNER_TEMP/game"/* "$RUNNER_TEMP/raw"/*
           df -h
 
-      - name: Upload IPA
+      - name: Upload RomFS.img to Gofile (if separate)
+        run: |
+          ROMFS_IMG=$(find "$RUNNER_TEMP/work/extract" -type f -name "RomFS.img" | head -n 1)
+          if [ -n "$ROMFS_IMG" ]; then
+            echo "Uploading RomFS.img ($(ls -lh "$ROMFS_IMG" | awk '{print $5}')) to Gofile..."
+            RESP=$(curl -fS --retry 3 -F "file=@$ROMFS_IMG" https://upload.gofile.io/uploadfile)
+            echo "$RESP"
+            LINK=$(echo "$RESP" | jq -r '.data.downloadPage // empty')
+            echo "=========================================="
+            echo "ROMFS DOWNLOAD LINK: $LINK"
+            echo "=========================================="
+          else
+            echo "No separate RomFS.img found (bundled inside IPA)."
+          fi
+
+      - name: Upload IPA to GitHub Artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: game-ipa
-          path: |
-            ${{ runner.temp }}/out/*.ipa
-            ${{ runner.temp }}/work/extract/*/RomFS.img
-          compression-level: 0
+          path: ${{ runner.temp }}/out/*.ipa
           retention-days: 7
