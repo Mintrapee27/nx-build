@@ -278,7 +278,6 @@ jobs:
                   time.sleep(5)
                   romfs_files = glob.glob(os.path.join(work_dir, "extract", "*", "RomFS.img"))
                   if romfs_files:
-                      # Wait until RomFS.img stops growing (extraction finished)
                       s1 = os.path.getsize(romfs_files[0])
                       time.sleep(3)
                       s2 = os.path.getsize(romfs_files[0])
@@ -292,7 +291,7 @@ jobs:
                           break
 
           threading.Thread(target=cleanup_source_when_extracted, daemon=True).start()
-          sys.argv = sys.argv[1:]
+          sys.argv[0] = "scripts/build_ipa_from_nsp.py"
           runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
           ' "$TARGET_INPUT" \
             "${EXTRA_ARGS[@]}" \
