@@ -47,6 +47,7 @@ jobs:
           sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* || true
           sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/* || true
           sudo rm -rf /Users/runner/Library/Caches/* || true
+          sudo rm -rf /Users/runner/Library/Developer/Xcode/Archives/* || true
           sudo rm -rf /usr/local/share/dotnet || true
           sudo rm -rf /opt/ghc || true
           brew cleanup --prune=all || true
@@ -85,21 +86,48 @@ jobs:
             local url="$1"
             local out="$2"
             if echo "$url" | grep -qiE "gofile\.io/d/"; then
-              python3 -c '
-          import sys, time
+              eval "$(python3 -c '
+          import sys, shlex
           from playwright.sync_api import sync_playwright
+
           with sync_playwright() as p:
               b = p.chromium.launch(headless=True)
-              c = b.new_context(accept_downloads=True)
+              c = b.new_context()
               page = c.new_page()
+              direct_url = None
+              req_headers = {}
+
+              def on_request(req):
+                  nonlocal direct_url, req_headers
+                  if "gofile.io/download/" in req.url or ("store" in req.url and "gofile.io" in req.url and "/download/" in req.url):
+                      direct_url = req.url
+                      req_headers = req.headers
+
+              page.on("request", on_request)
               page.goto(sys.argv[1], wait_until="networkidle", timeout=90000)
               page.wait_for_selector("button:has-text(\"Download\"), a:has-text(\"Download\")", timeout=45000)
-              time.sleep(2)
-              with page.expect_download(timeout=0) as dl:
-                  page.locator("button:has-text(\"Download\"), a:has-text(\"Download\")").first.click()
-              dl.value.save_as(sys.argv[2])
+              page.wait_for_timeout(1500)
+              page.locator("button:has-text(\"Download\"), a:has-text(\"Download\")").first.click()
+              for _ in range(40):
+                  if direct_url:
+                      break
+                  page.wait_for_timeout(500)
+              cookies = "; ".join([f"{ck[\"name\"]}={ck[\"value\"]}" for ck in c.cookies()])
+              ua = req_headers.get("user-agent", "Mozilla/5.0")
+              ref = req_headers.get("referer", "https://gofile.io/")
               b.close()
-          ' "$url" "$out"
+              if not direct_url:
+                  sys.exit(1)
+              print(f"GF_URL={shlex.quote(direct_url)}")
+              print(f"GF_COOKIE={shlex.quote(cookies)}")
+              print(f"GF_UA={shlex.quote(ua)}")
+              print(f"GF_REF={shlex.quote(ref)}")
+          ' "$url")"
+              curl -fL --retry 3 \
+                -H "Cookie: $GF_COOKIE" \
+                -H "User-Agent: $GF_UA" \
+                -H "Referer: $GF_REF" \
+                -o "$out" "$GF_URL"
             elif echo "$url" | grep -qiE "drive\.google\.com|docs\.google\.com"; then
               gdown "$url" -O "$out"
             else
@@ -169,7 +197,6 @@ jobs:
             i=$((i + 1))
           done
 
-          # Move .nsp/.xci/.nsz/.xcz/.nup from nested folders to root of $RUNNER_TEMP/game
           find "$RUNNER_TEMP/game" -mindepth 2 -type f \( -iname "*.nsp" -o -iname "*.xci" -o -iname "*.nsz" -o -iname "*.xcz" -o -iname "*.nup" \) -exec mv -n {} "$RUNNER_TEMP/game/" \;
 
           if find "$RUNNER_TEMP/game" -maxdepth 1 -type f \( -iname "*.nsz" -o -iname "*.xcz" \) | grep -q .; then
@@ -183,6 +210,7 @@ jobs:
           fi
 
           ls -lh "$RUNNER_TEMP/game"
+          df -h
 
       - name: Build IPA from NSP / NUP / Dump Folder
         env:
@@ -202,7 +230,6 @@ jobs:
             KEEP_FLAG="--no-keep-extracted"
           fi
 
-          # Detect input target: .nup file, extracted dump folder (containing exefs/romfs or base/), or standard game folder
           TARGET_INPUT="$RUNNER_TEMP/game"
           NUP_FILE=$(find "$RUNNER_TEMP/game" -maxdepth 1 -type f -iname "*.nup" | head -n 1)
           DUMP_EXEFS=$(find "$RUNNER_TEMP/game" -type d -iname "exefs" | head -n 1)
@@ -238,6 +265,9 @@ jobs:
             --romfs "$ROMFS_MODE" \
             $KEEP_FLAG \
             --progress lines
+
+          rm -rf "$RUNNER_TEMP/game"/*
+          df -h
 
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
