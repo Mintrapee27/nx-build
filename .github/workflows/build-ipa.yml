@@ -265,10 +265,46 @@ jobs:
 
           python3 -c '
           import sys, shutil, runpy, os, fcntl, struct, pathlib, re, builtins
-          from collections import namedtuple
+          from collections import namedtuple, Counter
 
           Usage = namedtuple("usage", "total used free")
           shutil.disk_usage = lambda path: Usage(200 * 1024**3, 10 * 1024**3, 190 * 1024**3)
+
+          sys.path.insert(0, "dm/tools")
+          import romfs_image
+
+          offset_counts = Counter()
+          def extract_ints(obj, out, depth=0):
+              if depth > 3:
+                  return
+              if isinstance(obj, int) and not isinstance(obj, bool):
+                  if obj >= 4096:
+                      out.append(obj)
+              elif isinstance(obj, (tuple, list)):
+                  for x in obj:
+                      extract_ints(x, out, depth + 1)
+              elif isinstance(obj, dict):
+                  for x in obj.values():
+                      extract_ints(x, out, depth + 1)
+              elif hasattr(obj, "__dict__"):
+                  for x in obj.__dict__.values():
+                      extract_ints(x, out, depth + 1)
+              elif hasattr(obj, "__slots__"):
+                  for s in obj.__slots__:
+                      if hasattr(obj, s):
+                          extract_ints(getattr(obj, s), out, depth + 1)
+
+          orig_write = romfs_image.write
+          def hooked_write(ents, dst, copy):
+              offset_counts.clear()
+              for e in ents:
+                  nums = []
+                  extract_ints(e[1], nums)
+                  for v in set(nums):
+                      offset_counts[v] += 1
+              print(f"[PUNCH-INIT] Indexed {len(offset_counts)} offsets from {len(ents)} entries (skipping deduplicated blobs)")
+              return orig_write(ents, dst, copy)
+          romfs_image.write = hooked_write
 
           nup_path = sys.argv[1]
           rw_fd = os.open(nup_path, os.O_RDWR) if os.path.isfile(nup_path) else None
@@ -277,7 +313,7 @@ jobs:
           bytes_since_flush = 0
           total_reclaimed = 0
           F_PUNCHHOLE = 99
-          ALIGN = 16384  # 16KB APFS page alignment on Apple Silicon
+          ALIGN = 16384
 
           def flush_holes():
               global intervals, bytes_since_flush, total_reclaimed
@@ -311,8 +347,10 @@ jobs:
               if total_reclaimed > 0 and total_reclaimed % (2 * 1024**3) < 128 * 1024**2:
                   print(f"[PUNCH-OK] Reclaimed {total_reclaimed / (1024**3):.2f} GB from base.nup")
 
-          def punch_nup(a, b):
+          def punch_nup(eoff, a, b):
               global bytes_since_flush
+              if offset_counts.get(eoff, 0) != 1:
+                  return
               intervals.append((a, b))
               bytes_since_flush += (b - a)
               if bytes_since_flush >= 128 * 1024 * 1024:
@@ -329,7 +367,7 @@ jobs:
                       f"{ind}for p in range(eoff, eoff + esz, 8 << 20):\n"
                       f"{ind}    end_p = min(p + (8 << 20), eoff + esz)\n"
                       f"{ind}    put(view[p:end_p])\n"
-                      f"{ind}    _punch_nup(p, end_p)"
+                      f"{ind}    _punch_nup(eoff, p, end_p)"
                   )
               new_code, count = re.subn(
                   r"^([ \t]*)for p in range\(eoff, eoff \+ esz, 8 << 20\): put\(view\[p:min\(p \+ \(8 << 20\), eoff \+ esz\)\]\)",
@@ -339,7 +377,7 @@ jobs:
               )
               if count:
                   pack_nup_path.write_text(new_code)
-                  print(f"[PATCH] Enabled macOS F_PUNCHHOLE (99) + 16KB align in pack_nup.py ({count} place)")
+                  print(f"[PATCH] Enabled dedup-safe F_PUNCHHOLE (99) in pack_nup.py ({count} place)")
 
           sys.argv[0] = "scripts/build_ipa_from_nsp.py"
           runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
