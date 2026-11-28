@@ -358,7 +358,7 @@ jobs:
 
           builtins._punch_nup = punch_nup
 
-          # Hook before [5/7] iOS shaders: delete base.nup + upload & truncate RomFS.img to free 25+ GB
+          # Hook right before [5/7] iOS shaders (after [4/7] shader split finishes)
           cleaned_for_shaders = False
           orig_popen = subprocess.Popen
           work_dir = sys.argv[sys.argv.index("--work-dir") + 1]
@@ -368,7 +368,7 @@ jobs:
               def __init__(self, args, *pargs, **kwargs):
                   global cleaned_for_shaders, rw_fd
                   cmd_str = " ".join(str(x) for x in args) if isinstance(args, (list, tuple)) else str(args)
-                  if not cleaned_for_shaders and "own_compilers.py" in cmd_str:
+                  if not cleaned_for_shaders and "own_compilers.py" in cmd_str and "pkg" in cmd_str:
                       cleaned_for_shaders = True
                       print("[PRE-SHADER] Freeing disk space before compiling 42k+ iOS shaders...")
                       if rw_fd is not None:
