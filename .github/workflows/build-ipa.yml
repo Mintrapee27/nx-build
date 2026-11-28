@@ -263,32 +263,56 @@ jobs:
           fi
 
           python3 -c '
-          import sys, shutil, runpy, os, fcntl, struct, pathlib, mmap, re, builtins
+          import sys, shutil, runpy, os, fcntl, struct, pathlib, re, builtins
           from collections import namedtuple
 
           Usage = namedtuple("usage", "total used free")
           shutil.disk_usage = lambda path: Usage(200 * 1024**3, 10 * 1024**3, 190 * 1024**3)
 
-          orig_mmap = mmap.mmap
-          nup_fds = set()
-          def hooked_mmap(fileno, length, *args, **kwargs):
-              try:
-                  if fileno > 2 and os.fstat(fileno).st_size > 1024**3:
-                      nup_fds.add(fileno)
-              except Exception:
-                  pass
-              return orig_mmap(fileno, length, *args, **kwargs)
-          mmap.mmap = hooked_mmap
+          nup_path = sys.argv[1]
+          rw_fd = os.open(nup_path, os.O_RDWR) if os.path.isfile(nup_path) else None
+
+          intervals = []
+          bytes_since_flush = 0
+          F_PUNCHHOLE = 115  # macOS fcntl F_PUNCHHOLE
+          ALIGN = 16 * 1024 * 1024  # 16MB APFS hole alignment
+
+          def flush_holes():
+              global intervals, bytes_since_flush
+              if not rw_fd or not intervals:
+                  return
+              intervals.sort()
+              merged = []
+              for s, e in intervals:
+                  if merged and s <= merged[-1][1]:
+                      merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+                  else:
+                      merged.append((s, e))
+              kept = []
+              for s, e in merged:
+                  a_s = (s + ALIGN - 1) & ~(ALIGN - 1)
+                  a_e = e & ~(ALIGN - 1)
+                  if a_e > a_s:
+                      try:
+                          fcntl.fcntl(rw_fd, F_PUNCHHOLE, struct.pack("IIqq", 0, 0, a_s, a_e - a_s))
+                      except Exception as ex:
+                          print(f"[PUNCH-WARN] {ex}")
+                      if a_s > s:
+                          kept.append((s, a_s))
+                      if e > a_e:
+                          kept.append((a_e, e))
+                  else:
+                      kept.append((s, e))
+              intervals = kept
+              bytes_since_flush = 0
 
           def punch_nup(a, b):
-              a_start = (a + 16777215) & ~16777215
-              a_end = b & ~16777215
-              if a_end > a_start:
-                  for fd in list(nup_fds):
-                      try:
-                          fcntl.fcntl(fd, 99, struct.pack("IIqq", 0, 0, a_start, a_end - a_start))
-                      except Exception:
-                          pass
+              global bytes_since_flush
+              intervals.append((a, b))
+              bytes_since_flush += (b - a)
+              if bytes_since_flush >= 128 * 1024 * 1024:
+                  flush_holes()
+
           builtins._punch_nup = punch_nup
 
           pack_nup_path = pathlib.Path("scripts/pack_nup.py")
@@ -310,7 +334,7 @@ jobs:
               )
               if count:
                   pack_nup_path.write_text(new_code)
-                  print(f"[PATCH] Enabled F_PUNCHHOLE in pack_nup.py ({count} place)")
+                  print(f"[PATCH] Enabled macOS F_PUNCHHOLE (115) + interval merge in pack_nup.py ({count} place)")
 
           sys.argv[0] = "scripts/build_ipa_from_nsp.py"
           runpy.run_path("scripts/build_ipa_from_nsp.py", run_name="__main__")
